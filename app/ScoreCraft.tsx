@@ -667,7 +667,11 @@ export function ScoreCraft() {
   async function startSynthPlayback(startAt: number) {
     const context = new AudioContext();
     audioContext.current = context;
-    void context.resume();
+    const resume = context.resume();
+    await Promise.race([
+      resume.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 250)),
+    ]);
     setMessage("Loading the local sampled grand piano");
     let samples: Map<number, AudioBuffer>;
     try {
@@ -693,16 +697,14 @@ export function ScoreCraft() {
       + (note.durationSeconds ?? note.beats * beatSeconds)
     ) >= startAt));
     if (eventIndex < 0) eventIndex = events.length;
-    const wallStartedAt = performance.now();
-
     const compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = -18;
-    compressor.knee.value = 12;
-    compressor.ratio.value = 3;
+    compressor.threshold.value = -10;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 1.8;
     compressor.attack.value = 0.004;
-    compressor.release.value = 0.28;
+    compressor.release.value = 0.2;
     const master = context.createGain();
-    master.gain.value = 0.86;
+    master.gain.value = 0.78;
     const room = context.createConvolver();
     const roomGain = context.createGain();
     const impulse = context.createBuffer(2, Math.ceil(context.sampleRate * 1.35), context.sampleRate);
@@ -710,11 +712,12 @@ export function ScoreCraft() {
       const data = impulse.getChannelData(channel);
       for (let index = 0; index < data.length; index += 1) {
         const decay = (1 - index / data.length) ** 2.8;
-        data[index] = (Math.random() * 2 - 1) * decay;
+        const deterministicNoise = Math.sin((index + 1) * (channel + 1) * 12.9898) * 43758.5453;
+        data[index] = ((deterministicNoise - Math.floor(deterministicNoise)) * 2 - 1) * decay;
       }
     }
     room.buffer = impulse;
-    roomGain.gain.value = 0.11;
+    roomGain.gain.value = 0.065;
     master.connect(compressor);
     master.connect(room).connect(roomGain).connect(compressor);
     compressor.connect(context.destination);
@@ -724,7 +727,7 @@ export function ScoreCraft() {
       const noteDuration = Math.max(0.14, note.durationSeconds ?? note.beats * beatSeconds);
       const elapsedIntoNote = Math.max(0, sourcePosition - noteStart);
       if (elapsedIntoNote >= noteDuration) return;
-      const when = context.currentTime + Math.max(0.01, noteStart - sourcePosition);
+      const when = Math.max(context.currentTime + 0.005, audioOrigin + noteStart);
       const audibleDuration = Math.max(0.08, noteDuration - elapsedIntoNote);
       const anchor = pianoSampleMidis.reduce((nearest, midi) => (
         Math.abs(midi - note.midi) < Math.abs(nearest - note.midi) ? midi : nearest
@@ -735,20 +738,22 @@ export function ScoreCraft() {
       const gain = context.createGain();
       source.buffer = sample;
       source.playbackRate.value = 2 ** ((note.midi - anchor) / 12);
-      const velocity = Math.max(0.18, Math.min(1, (note.velocity ?? 72) / 108));
-      const level = velocity * Math.max(0.1, volume / 100) * 0.72;
+      const velocity = Math.max(0.02, Math.min(1, (note.velocity ?? 72) / 127) ** 1.7);
+      const level = velocity * Math.max(0.1, volume / 100) * 0.82;
       const releaseAt = when + audibleDuration;
       gain.gain.setValueAtTime(level, when);
       gain.gain.setValueAtTime(level * 0.82, Math.max(when, releaseAt - 0.08));
       gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + 0.22);
       source.connect(gain).connect(master);
-      source.start(when, Math.min(elapsedIntoNote, Math.max(0, sample.duration - 0.05)));
+      const sampleOffset = elapsedIntoNote * source.playbackRate.value;
+      source.start(when, Math.min(sampleOffset, Math.max(0, sample.duration - 0.05)));
       source.stop(releaseAt + 0.24);
     };
 
+    const audioOrigin = context.currentTime - startAt;
     setPlaying(true);
-    timer.current = setInterval(() => {
-      const sourcePosition = startAt + (performance.now() - wallStartedAt) / 1000;
+    const pump = () => {
+      const sourcePosition = context.currentTime - audioOrigin;
       while (eventIndex < events.length) {
         const event = events[eventIndex];
         const noteStart = event.note.startSeconds ?? event.note.startBeat * beatSeconds;
@@ -763,7 +768,9 @@ export function ScoreCraft() {
           setTimeout(() => void startPlayback(), 80);
         } else stopPlayback(true);
       } else setPlayhead(next);
-    }, 60);
+    };
+    pump();
+    timer.current = setInterval(pump, 45);
   }
 
   function startPlayback() {
@@ -772,7 +779,10 @@ export function ScoreCraft() {
       return;
     }
     const startAt = (playhead / 100) * duration;
-    void startSynthPlayback(startAt);
+    void startSynthPlayback(startAt).catch((error) => {
+      stopPlayback();
+      setMessage(error instanceof Error ? `Playback failed: ${error.message}` : "Playback could not start");
+    });
   }
 
   function updateTrack(id: number, patch: Partial<Track>) {

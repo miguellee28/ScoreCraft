@@ -14,6 +14,13 @@ export type PianoTranscriptionResult = {
 
 let modelPromise: Promise<BasicPitch> | null = null;
 
+const PIANO_PROFILE = {
+  onsetThreshold: 0.48,
+  frameThreshold: 0.33,
+  minimumNoteLengthFrames: 7,
+  minimumVelocity: 30,
+} as const;
+
 function getModel() {
   if (!modelPromise) {
     modelPromise = Promise.resolve(new BasicPitch("/basic-pitch/model.json"));
@@ -62,6 +69,44 @@ function estimateTempo(audio: AudioBuffer) {
   return Math.round(bestTempo);
 }
 
+function normalizeDetectedNotes(notes: PianoNoteEvent[]) {
+  const byPitch = new Map<number, PianoNoteEvent[]>();
+  notes.forEach((note) => byPitch.set(note.midi, [...(byPitch.get(note.midi) ?? []), note]));
+
+  const normalized: PianoNoteEvent[] = [];
+  byPitch.forEach((pitchNotes) => {
+    const kept: PianoNoteEvent[] = [];
+    pitchNotes
+      .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity)
+      .forEach((note) => {
+        const previous = kept[kept.length - 1];
+        if (!previous) {
+          kept.push({ ...note });
+          return;
+        }
+
+        const previousEnd = previous.startSeconds + previous.durationSeconds;
+        const onsetDistance = note.startSeconds - previous.startSeconds;
+        const gap = note.startSeconds - previousEnd;
+        const duplicateOnset = onsetDistance < 0.075;
+        const weakContinuation = gap <= 0.05 && note.velocity <= previous.velocity * 0.9;
+        const overlappingArtifact = note.startSeconds < previousEnd && note.velocity <= previous.velocity * 1.12;
+        if (duplicateOnset || weakContinuation || overlappingArtifact) {
+          previous.durationSeconds = Math.max(previousEnd, note.startSeconds + note.durationSeconds) - previous.startSeconds;
+          previous.velocity = Math.max(previous.velocity, note.velocity);
+          return;
+        }
+
+        if (note.startSeconds < previousEnd) {
+          previous.durationSeconds = Math.max(0.08, note.startSeconds - previous.startSeconds - 0.015);
+        }
+        kept.push({ ...note });
+      });
+    normalized.push(...kept);
+  });
+  return normalized.sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
+}
+
 export async function transcribePiano(
   file: File,
   onProgress: (progress: number, label: string) => void,
@@ -102,9 +147,9 @@ export async function transcribePiano(
     const detected = noteFramesToTime(outputToNotesPoly(
       frames,
       onsets,
-      0.55,
-      0.4,
-      10,
+      PIANO_PROFILE.onsetThreshold,
+      PIANO_PROFILE.frameThreshold,
+      PIANO_PROFILE.minimumNoteLengthFrames,
       true,
       4200,
       27.5,
@@ -119,16 +164,11 @@ export async function transcribePiano(
         note.midi >= 24
         && note.midi <= 100
         && note.durationSeconds >= 0.1
-        && note.velocity >= 45
+        && note.velocity >= PIANO_PROFILE.minimumVelocity
       ))
       .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
 
-    const cleaned = detected.filter((note, index) => !detected
-      .slice(Math.max(0, index - 20), index)
-      .some((previous) => (
-        previous.midi === note.midi
-        && Math.abs(previous.startSeconds - note.startSeconds) < 0.075
-      )));
+    const cleaned = normalizeDetectedNotes(detected);
 
     onProgress(96, "Preparing the readable grand staff");
     return { notes: cleaned, tempo: detectedTempo };
