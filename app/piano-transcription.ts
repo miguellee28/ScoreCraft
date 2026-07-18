@@ -19,6 +19,9 @@ const PIANO_PROFILE = {
   frameThreshold: 0.33,
   minimumNoteLengthFrames: 7,
   minimumVelocity: 30,
+  shortArtifactMaximumSeconds: 0.25,
+  shortArtifactMinimumVelocity: 55,
+  maximumFragmentMergeBeats: 0.92,
 } as const;
 
 function getModel() {
@@ -87,11 +90,8 @@ function normalizeDetectedNotes(notes: PianoNoteEvent[]) {
 
         const previousEnd = previous.startSeconds + previous.durationSeconds;
         const onsetDistance = note.startSeconds - previous.startSeconds;
-        const gap = note.startSeconds - previousEnd;
         const duplicateOnset = onsetDistance < 0.075;
-        const weakContinuation = gap <= 0.05 && note.velocity <= previous.velocity * 0.9;
-        const overlappingArtifact = note.startSeconds < previousEnd && note.velocity <= previous.velocity * 1.12;
-        if (duplicateOnset || weakContinuation || overlappingArtifact) {
+        if (duplicateOnset) {
           previous.durationSeconds = Math.max(previousEnd, note.startSeconds + note.durationSeconds) - previous.startSeconds;
           previous.velocity = Math.max(previous.velocity, note.velocity);
           return;
@@ -105,6 +105,48 @@ function normalizeDetectedNotes(notes: PianoNoteEvent[]) {
     normalized.push(...kept);
   });
   return normalized.sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
+}
+
+function mergeSamePitchFragments(notes: PianoNoteEvent[], tempo: number) {
+  const maximumOnsetDistanceSeconds = PIANO_PROFILE.maximumFragmentMergeBeats * 60 / tempo;
+  const byPitch = new Map<number, PianoNoteEvent[]>();
+  notes.forEach((note) => byPitch.set(note.midi, [...(byPitch.get(note.midi) ?? []), note]));
+
+  const repaired: PianoNoteEvent[] = [];
+  byPitch.forEach((pitchNotes) => {
+    const kept: PianoNoteEvent[] = [];
+    pitchNotes
+      .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity)
+      .forEach((note) => {
+        const previous = kept[kept.length - 1];
+        if (!previous) {
+          kept.push({ ...note });
+          return;
+        }
+
+        const previousEnd = previous.startSeconds + previous.durationSeconds;
+        const onsetDistance = note.startSeconds - previous.startSeconds;
+        const gap = note.startSeconds - previousEnd;
+        const weakContinuation = gap <= 0.05 && note.velocity <= previous.velocity * 0.9;
+        const overlappingArtifact = note.startSeconds < previousEnd && note.velocity <= previous.velocity * 1.12;
+        if (
+          onsetDistance <= maximumOnsetDistanceSeconds
+          && (weakContinuation || overlappingArtifact)
+        ) {
+          previous.durationSeconds = Math.max(previousEnd, note.startSeconds + note.durationSeconds) - previous.startSeconds;
+          previous.velocity = Math.max(previous.velocity, note.velocity);
+          return;
+        }
+
+        if (note.startSeconds < previousEnd) {
+          previous.durationSeconds = Math.max(0.08, note.startSeconds - previous.startSeconds - 0.015);
+        }
+        kept.push({ ...note });
+      });
+    repaired.push(...kept);
+  });
+
+  return repaired.sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
 }
 
 export async function transcribePiano(
@@ -168,10 +210,18 @@ export async function transcribePiano(
       ))
       .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
 
-    const cleaned = normalizeDetectedNotes(detected);
+    const shortArtifactMaximumSeconds = Math.min(
+      PIANO_PROFILE.shortArtifactMaximumSeconds,
+      15 / detectedTempo,
+    );
+    const cleaned = normalizeDetectedNotes(detected).filter((note) => (
+      note.durationSeconds >= shortArtifactMaximumSeconds
+      || note.velocity >= PIANO_PROFILE.shortArtifactMinimumVelocity
+    ));
+    const repaired = mergeSamePitchFragments(cleaned, detectedTempo);
 
     onProgress(96, "Preparing the readable grand staff");
-    return { notes: cleaned, tempo: detectedTempo };
+    return { notes: repaired, tempo: detectedTempo };
   } finally {
     await context.close();
   }

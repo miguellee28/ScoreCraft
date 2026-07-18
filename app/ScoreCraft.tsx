@@ -582,6 +582,32 @@ export function ScoreCraft() {
     if (context && context.state !== "closed") void context.close().catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fixture = params.get("qaFixture");
+    if (!fixture || !["localhost", "127.0.0.1"].includes(window.location.hostname)) return;
+    const fixtureUrl = new URL(fixture, window.location.origin);
+    if (fixtureUrl.origin !== window.location.origin || !fixtureUrl.pathname.startsWith("/qa/")) return;
+    let cancelled = false;
+    void fetch(fixtureUrl)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`QA fixture returned ${response.status}`);
+        const blob = await response.blob();
+        if (cancelled) return;
+        const fixtureFile = new File([blob], fixtureUrl.pathname.split("/").pop() || "qa-audio.mp3", {
+          type: blob.type || "audio/mpeg",
+        });
+        setSourceMode("upload");
+        setFile(fixtureFile);
+        setTitle(fixtureFile.name.replace(/\.[^.]+$/, ""));
+        setMessage(`${fixtureFile.name} loaded as a local QA fixture`);
+      })
+      .catch((error) => {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : "QA fixture could not be loaded");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   function chooseFile(next: File | undefined) {
     if (!next) return;
     if (!next.type.startsWith("audio/") && !next.type.startsWith("video/") && !/\.(mp3|wav|m4a|aac|ogg|mp4|webm|mov)$/i.test(next.name)) {
@@ -657,6 +683,18 @@ export function ScoreCraft() {
         const quantized = quantizePianoEvents(transcription.notes, detectedTempo);
         playbackNoteCount = quantized.length;
         setPlaybackNotes(quantized);
+        const params = new URLSearchParams(window.location.search);
+        const qaFixture = params.has("qaFixture") && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+        if (qaFixture) {
+          document.documentElement.dataset.scorecraftQaTranscription = JSON.stringify({
+            tempo: detectedTempo,
+            notes: quantized,
+          });
+          setAnalysis({ progress: 100, label: "QA transcription ready" });
+          setTimeout(() => setAnalysis(null), 650);
+          setMessage(`QA transcription ready with ${quantized.length} detected piano notes.`);
+          return;
+        }
         notes = cleanPianoNotes(quantized);
       } catch (error) {
         setAnalysis(null);

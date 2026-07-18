@@ -31,6 +31,7 @@ yarn-error.log*
 .codex-dev*.log
 output/
 tmp/
+public/qa/
 
 # env files (can opt-in for committing if needed)
 .env*
