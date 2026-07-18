@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@font-face { font-family: "Bravura"; src: url("/fonts/bravura.woff2") format("woff2"); font-display: block; }
+@font-face { font-family: "Academico"; src: url("/fonts/academico.woff2") format("woff2"); font-weight: 400; font-display: block; }
+@font-face { font-family: "Academico"; src: url("/fonts/academico-bold.woff2") format("woff2"); font-weight: 700; font-display: block; }
+
 :root {
   --ink: #211c25;
   --muted: #736d78;
@@ -266,12 +270,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
   .score-paper { box-shadow: none; transform: none !important; margin: 0 !important; width: auto; min-height: 0; padding: 0; overflow: visible; }
   .paper-texture { display: none; }
   .score-heading input { color: #211c25; }
-  .staff-row { break-inside: avoid; }
-  .piano-system { break-inside: avoid; }
-  .piano-system:nth-child(3n):not(:last-child) { break-after: page; }
+  .staff-row, .piano-grand-system { break-inside: avoid; page-break-inside: avoid; }
+  .piano-grand-system:nth-child(4n):not(:last-child) { break-after: page; page-break-after: always; }
   .engraved-staff .vf-stavenote.selected path,
   .engraved-staff .vf-stavenote.selected line,
-  .engraved-staff .vf-stavenote.selected polygon { fill: #211c25 !important; stroke: #211c25 !important; }
+  .engraved-staff .vf-stavenote.selected polygon,
+  .engraved-grand-staff .vf-stavenote.selected path,
+  .engraved-grand-staff .vf-stavenote.selected line,
+  .engraved-grand-staff .vf-stavenote.selected text { fill: #211c25 !important; stroke: #211c25 !important; }
   .page-footer { position: static; margin-top: 12mm; }
 }
 

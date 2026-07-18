@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -21,4 +22,19 @@ test("renders the ScoreCraft music workspace", async () => {
   assert.match(html, /Transcribed piano/);
   assert.match(html, /Moonlit Waltz/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("keeps full transcription playback and print-ready piano export", async () => {
+  const [component, styles, samples] = await Promise.all([
+    readFile(new URL("../app/ScoreCraft.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readdir(new URL("../public/salamander-piano/", import.meta.url)),
+  ]);
+  assert.match(component, /Play preserves all/);
+  assert.match(component, /\/salamander-piano\/\$\{midi\}\.mp3/);
+  assert.match(component, /quantizePianoEvents/);
+  assert.match(component, /PDF exported: \$\{pdf\.getNumberOfPages\(\)\} A4 pages/);
+  assert.match(styles, /\.piano-grand-system:nth-child\(4n\)/);
+  assert.match(styles, /\/fonts\/bravura\.woff2/);
+  assert.equal(samples.filter((name) => name.endsWith(".mp3")).length, 30);
 });

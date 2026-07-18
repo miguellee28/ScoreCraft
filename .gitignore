@@ -29,6 +29,8 @@ yarn-error.log*
 .pnpm-debug.log*
 .devserver*.log
 .codex-dev*.log
+output/
+tmp/
 
 # env files (can opt-in for committing if needed)
 .env*

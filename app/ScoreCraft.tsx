@@ -14,6 +14,7 @@ type Note = {
   midi: number;
   startBeat: number;
   beats: number;
+  sourceIndex?: number;
   velocity?: number;
   startSeconds?: number;
   durationSeconds?: number;
@@ -122,7 +123,35 @@ function inferChordProgression(notes: Note[]) {
     progression[measure] = candidates[cursor];
     cursor = previous[measure][cursor];
   }
+  for (let measure = 1; measure < progression.length - 1; measure += 1) {
+    const prior = progression[measure - 1];
+    const next = progression[measure + 1];
+    if (prior.root !== next.root || progression[measure].root === prior.root) continue;
+    const currentIndex = candidates.indexOf(progression[measure]);
+    const priorIndex = candidates.indexOf(prior);
+    if (emissions[measure][currentIndex] - emissions[measure][priorIndex] < 1.5) progression[measure] = prior;
+  }
   return progression;
+}
+
+function quantizePianoEvents(
+  events: Array<{ midi: number; startSeconds: number; durationSeconds: number; velocity: number }>,
+  tempo: number,
+) {
+  const audible = events.filter((note) => note.velocity >= 52 && note.durationSeconds >= 0.1);
+  const scoreOriginSeconds = Math.max(0, Math.min(
+    ...((audible.length ? audible : events).map((note) => note.startSeconds)),
+  ));
+  const secondsPerBeat = 60 / tempo;
+  return events.map((note, sourceIndex) => ({
+    midi: note.midi,
+    sourceIndex,
+    startBeat: Math.max(0, Math.round(((note.startSeconds - scoreOriginSeconds) / secondsPerBeat) * 4) / 4),
+    beats: Math.max(0.25, Math.min(4, Math.round((note.durationSeconds / secondsPerBeat) * 4) / 4)),
+    velocity: note.velocity,
+    startSeconds: note.startSeconds,
+    durationSeconds: note.durationSeconds,
+  }));
 }
 
 function cleanPianoNotes(notes: Note[]) {
@@ -145,13 +174,14 @@ function cleanPianoNotes(notes: Note[]) {
     const melody = [...treble].sort((a, b) => (
       ((b.velocity ?? 0) + (b.midi - 60) * 1.1) - ((a.velocity ?? 0) + (a.midi - 60) * 1.1)
     ))[0];
+    const trebleByStrength = [...treble].sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0));
     const trebleChordTones = treble
       .filter((note) => chord.tones.has(((note.midi % 12) + 12) % 12))
       .sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0));
-    const keptTreble = [melody, ...trebleChordTones]
+    const keptTreble = [melody, ...trebleChordTones, ...trebleByStrength]
       .filter((note): note is Note => Boolean(note))
       .filter((note, index, all) => all.indexOf(note) === index)
-      .slice(0, 4);
+      .slice(0, 5);
     const bassChordTones = bass
       .filter((note) => chord.tones.has(((note.midi % 12) + 12) % 12))
       .sort((a, b) => {
@@ -159,7 +189,10 @@ function cleanPianoNotes(notes: Note[]) {
         const bRoot = ((b.midi % 12) + 12) % 12 === chord.root ? 35 : 0;
         return ((b.velocity ?? 0) + bRoot) - ((a.velocity ?? 0) + aRoot);
       });
-    const keptBass = (bassChordTones.length ? bassChordTones : [...bass].sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0))).slice(0, 2);
+    const bassByStrength = [...bass].sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0));
+    const keptBass = [...bassChordTones, ...bassByStrength]
+      .filter((note, index, all) => all.indexOf(note) === index)
+      .slice(0, 3);
     return [...keptTreble, ...keptBass];
   }).sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
 
@@ -190,13 +223,13 @@ function noteLabel(midi: number) {
   return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
 }
 
-const pianoSampleMidis = [...Array.from({ length: 26 }, (_, index) => 24 + index * 3), 100];
+const pianoSampleMidis = Array.from({ length: 30 }, (_, index) => 21 + index * 3);
 let pianoSamplesPromise: Promise<Map<number, AudioBuffer>> | null = null;
 
 function loadPianoSamples(context: AudioContext) {
   if (!pianoSamplesPromise) {
     pianoSamplesPromise = Promise.all(pianoSampleMidis.map(async (midi) => {
-      const response = await fetch(`/piano-samples/${midi}.mp3`);
+      const response = await fetch(`/salamander-piano/${midi}.mp3`);
       if (!response.ok) throw new Error(`Piano sample ${midi} could not be loaded`);
       return [midi, await context.decodeAudioData(await response.arrayBuffer())] as const;
     })).then((entries) => new Map(entries));
@@ -394,6 +427,11 @@ function PianoSystem({
             if (onset >= measureEnd) return;
             groups.set(onset, [...(groups.get(onset) ?? []), note]);
           });
+        const earliestOnset = Math.min(...groups.keys());
+        if (Number.isFinite(earliestOnset) && earliestOnset > measureStart && earliestOnset - measureStart <= 0.5) {
+          groups.set(measureStart, [...(groups.get(measureStart) ?? []), ...(groups.get(earliestOnset) ?? [])]);
+          groups.delete(earliestOnset);
+        }
         const starts = [...groups.keys()].sort((a, b) => a - b);
         const tickables: InstanceType<typeof StaveNote>[] = [];
         const indexes: Array<number | null> = [];
@@ -490,6 +528,7 @@ export function ScoreCraft() {
   const [title, setTitle] = useState("Moonlit Waltz");
   const [composer, setComposer] = useState("Arranged with ScoreCraft");
   const [tracks, setTracks] = useState<Track[]>(baseTracks);
+  const [playbackNotes, setPlaybackNotes] = useState<Note[]>(baseTracks[0].notes);
   const [tempo, setTempo] = useState(92);
   const [zoom, setZoom] = useState(86);
   const [playing, setPlaying] = useState(false);
@@ -586,6 +625,7 @@ export function ScoreCraft() {
     }
 
     let notes: Note[] = [];
+    let playbackNoteCount = 0;
     if (sourceFile) {
       try {
         rememberPlaybackSource(sourceFile);
@@ -593,15 +633,10 @@ export function ScoreCraft() {
         const transcription = await transcribePiano(sourceFile, (progress, label) => setAnalysis({ progress, label }));
         const detectedTempo = transcription.tempo;
         setTempo(detectedTempo);
-        const events = transcription.notes;
-        notes = cleanPianoNotes(events.map((note) => ({
-          midi: note.midi,
-          startBeat: Math.max(0, Math.round((note.startSeconds * detectedTempo / 60) * 4) / 4),
-          beats: Math.max(0.25, Math.min(4, Math.round((note.durationSeconds * detectedTempo / 60) * 4) / 4)),
-          velocity: note.velocity,
-          startSeconds: note.startSeconds,
-          durationSeconds: note.durationSeconds,
-        })));
+        const quantized = quantizePianoEvents(transcription.notes, detectedTempo);
+        playbackNoteCount = quantized.length;
+        setPlaybackNotes(quantized);
+        notes = cleanPianoNotes(quantized);
       } catch (error) {
         setAnalysis(null);
         setMessage(error instanceof Error ? `Piano transcription failed: ${error.message}` : "The browser could not transcribe this audio.");
@@ -614,7 +649,9 @@ export function ScoreCraft() {
     }
     setAnalysis({ progress: 100, label: "Piano score ready" });
     setTimeout(() => setAnalysis(null), 650);
-    setMessage(notes.length ? `Transcribed ${notes.length} piano notes with tempo and harmony cleanup.` : "No clear piano notes were detected. Use a piano-only recording with little background noise.");
+    setMessage(notes.length
+      ? `Engraved ${notes.length} readable notes. Play preserves all ${playbackNoteCount} detected piano notes.`
+      : "No clear piano notes were detected. Use a piano-only recording with little background noise.");
   }
 
   function stopPlayback(reset = false) {
@@ -641,10 +678,9 @@ export function ScoreCraft() {
       return;
     }
     const beatSeconds = 60 / tempo;
-    const soloed = tracks.some((track) => track.solo);
-    const events = tracks
-      .filter((track) => !track.muted && (!soloed || track.solo))
-      .flatMap((track) => track.notes.map((note) => ({ note, volume: track.volume })))
+    const piano = tracks[0];
+    const events = (!piano || piano.muted ? [] : playbackNotes)
+      .map((note) => ({ note, volume: piano?.volume ?? 78 }))
       .sort((a, b) => a.note.startBeat - b.note.startBeat || a.note.midi - b.note.midi);
     if (!events.length) {
       setMessage("There are no audible piano notes. Unmute Piano or transcribe a recording first.");
@@ -666,8 +702,22 @@ export function ScoreCraft() {
     compressor.attack.value = 0.004;
     compressor.release.value = 0.28;
     const master = context.createGain();
-    master.gain.value = 0.92;
-    master.connect(compressor).connect(context.destination);
+    master.gain.value = 0.86;
+    const room = context.createConvolver();
+    const roomGain = context.createGain();
+    const impulse = context.createBuffer(2, Math.ceil(context.sampleRate * 1.35), context.sampleRate);
+    for (let channel = 0; channel < impulse.numberOfChannels; channel += 1) {
+      const data = impulse.getChannelData(channel);
+      for (let index = 0; index < data.length; index += 1) {
+        const decay = (1 - index / data.length) ** 2.8;
+        data[index] = (Math.random() * 2 - 1) * decay;
+      }
+    }
+    room.buffer = impulse;
+    roomGain.gain.value = 0.11;
+    master.connect(compressor);
+    master.connect(room).connect(roomGain).connect(compressor);
+    compressor.connect(context.destination);
 
     const scheduleNote = (note: Note, volume: number, sourcePosition: number) => {
       const noteStart = note.startSeconds ?? note.startBeat * beatSeconds;
@@ -732,10 +782,16 @@ export function ScoreCraft() {
 
   function transposeSelected(amount: number) {
     const [trackId, noteIndex] = selectedNote.split("-").map(Number);
+    const sourceIndex = tracks.find((track) => track.id === trackId)?.notes[noteIndex]?.sourceIndex;
     setTracks((current) => current.map((track) => track.id !== trackId ? track : {
       ...track,
       notes: track.notes.map((note, index) => index === noteIndex ? { ...note, midi: note.midi + amount } : note),
     }));
+    if (sourceIndex !== undefined) {
+      setPlaybackNotes((current) => current.map((note) => (
+        note.sourceIndex === sourceIndex ? { ...note, midi: note.midi + amount } : note
+      )));
+    }
     setMessage(`Note moved ${amount > 0 ? "up" : "down"} one semitone`);
   }
 
@@ -848,10 +904,162 @@ export function ScoreCraft() {
     setMessage("Two-staff piano MusicXML exported");
   }
 
-  function exportPdf() {
+  async function exportPdf() {
     setExportMenu(false);
-    setMessage("Opening the print dialog. Choose Save as PDF.");
-    window.print();
+    setMessage("Building the paginated piano PDF");
+    const paper = document.querySelector<HTMLElement>(".score-paper");
+    const previousTransform = paper?.style.transform ?? "";
+    try {
+      if (paper) paper.style.transform = "none";
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const { jsPDF } = await import("jspdf");
+      const systems = [...document.querySelectorAll<HTMLElement>(".piano-grand-system")];
+      const systemSvgs = systems.map((system) => system.querySelector<SVGSVGElement>(".engraved-grand-staff svg"));
+      if (!systems.length || systemSvgs.some((svg) => !svg)) throw new Error("No engraved piano systems are ready to export");
+
+      const blobAsDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener("load", () => resolve(String(reader.result)), { once: true });
+        reader.addEventListener("error", () => reject(reader.error ?? new Error("A notation font could not be read")), { once: true });
+        reader.readAsDataURL(blob);
+      });
+      const fontData = await Promise.all(["bravura.woff2", "academico.woff2", "academico-bold.woff2"].map(async (name) => {
+        const response = await fetch(`/fonts/${name}`);
+        if (!response.ok) throw new Error(`Notation font ${name} could not be loaded`);
+        return blobAsDataUrl(await response.blob());
+      }));
+      const [bravuraFont, academicoFont, academicoBoldFont] = fontData;
+      const notationPadding = 24;
+      const svgToImage = async (source: SVGSVGElement) => {
+        const clone = source.cloneNode(true) as SVGSVGElement;
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        clone.querySelectorAll("text").forEach((textNode) => {
+          const text = textNode.textContent ?? "";
+          textNode.setAttribute("font-family", /^[\u0020-\u007e]+$/.test(text) ? "Academico" : "Bravura");
+        });
+        const sourceWidth = Number(source.getAttribute("width")) || 650;
+        const sourceHeight = Number(source.getAttribute("height")) || 205;
+        const translated = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        translated.setAttribute("transform", `translate(${notationPadding} 0)`);
+        while (clone.firstChild) translated.appendChild(clone.firstChild);
+        clone.appendChild(translated);
+        clone.setAttribute("width", String(sourceWidth + notationPadding * 2));
+        clone.setAttribute("height", String(sourceHeight));
+        clone.setAttribute("viewBox", `0 0 ${sourceWidth + notationPadding * 2} ${sourceHeight}`);
+        const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+        style.textContent = `
+          @font-face { font-family: Bravura; src: url("${bravuraFont}") format("woff2"); }
+          @font-face { font-family: Academico; src: url("${academicoFont}") format("woff2"); font-weight: 400; }
+          @font-face { font-family: Academico; src: url("${academicoBoldFont}") format("woff2"); font-weight: 700; }
+        `;
+        clone.insertBefore(style, clone.firstChild);
+        const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" }));
+        const image = new Image();
+        try {
+          image.src = url;
+          await image.decode();
+          return image;
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      };
+
+      const headingCanvas = document.createElement("canvas");
+      headingCanvas.width = 1_400;
+      headingCanvas.height = 210;
+      const headingContext = headingCanvas.getContext("2d");
+      if (!headingContext) throw new Error("The PDF heading canvas could not be created");
+      headingContext.fillStyle = "#ffffff";
+      headingContext.fillRect(0, 0, headingCanvas.width, headingCanvas.height);
+      headingContext.fillStyle = "#211c25";
+      headingContext.textAlign = "center";
+      let titleSize = 48;
+      do {
+        headingContext.font = `700 ${titleSize}px Georgia, "Times New Roman", serif`;
+        if (headingContext.measureText(title).width <= headingCanvas.width - 80) break;
+        titleSize -= 2;
+      } while (titleSize > 22);
+      headingContext.fillText(title, headingCanvas.width / 2, 58);
+      headingContext.font = "italic 20px Georgia, 'Times New Roman', serif";
+      headingContext.fillStyle = "#69406f";
+      headingContext.fillText(composer, headingCanvas.width / 2, 96);
+      headingContext.fillStyle = "#211c25";
+      headingContext.textAlign = "left";
+      headingContext.font = "italic 18px Georgia, 'Times New Roman', serif";
+      headingContext.fillText("Andante, con moto", 50, 164);
+      headingContext.textAlign = "right";
+      headingContext.fillText(`Quarter note = ${tempo}`, headingCanvas.width - 50, 164);
+
+      const notationScale = 1.6;
+      const labelWidth = 78;
+      const systemStride = 218;
+      const svgWidth = Math.max(...systemSvgs.map((svg) => Number(svg?.getAttribute("width")) || 650)) + notationPadding * 2;
+      const scoreCanvas = document.createElement("canvas");
+      scoreCanvas.width = Math.ceil((labelWidth + svgWidth) * notationScale);
+      scoreCanvas.height = Math.ceil(systemStride * systems.length * notationScale);
+      const scoreContext = scoreCanvas.getContext("2d");
+      if (!scoreContext) throw new Error("The notation canvas could not be created");
+      scoreContext.fillStyle = "#ffffff";
+      scoreContext.fillRect(0, 0, scoreCanvas.width, scoreCanvas.height);
+      for (let index = 0; index < systemSvgs.length; index += 1) {
+        const image = await svgToImage(systemSvgs[index] as SVGSVGElement);
+        scoreContext.drawImage(image, labelWidth * notationScale, index * systemStride * notationScale, svgWidth * notationScale, 205 * notationScale);
+      }
+      scoreContext.fillStyle = "#211c25";
+      scoreContext.font = `700 ${13 * notationScale}px Georgia, "Times New Roman", serif`;
+      scoreContext.fillText("Piano", 7 * notationScale, 90 * notationScale);
+
+      const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const marginX = 12;
+      const top = 10;
+      const contentWidth = pageWidth - marginX * 2;
+      const systemsPerPage = 4;
+      const headingHeight = Math.min(27, contentWidth * headingCanvas.height / headingCanvas.width);
+
+      for (let pageStart = 0; pageStart < systems.length; pageStart += systemsPerPage) {
+        if (pageStart) pdf.addPage("a4", "portrait");
+        pdf.addImage(headingCanvas, "PNG", marginX, top, contentWidth, headingHeight, "score-heading", "FAST");
+        const pageEnd = Math.min(systems.length, pageStart + systemsPerPage);
+        const sourceY = Math.round(pageStart * systemStride * notationScale);
+        const sourceEnd = Math.round(pageEnd * systemStride * notationScale);
+        const pageCanvas = document.createElement("canvas");
+        pageCanvas.width = scoreCanvas.width;
+        pageCanvas.height = Math.max(1, sourceEnd - sourceY);
+        const pageContext = pageCanvas.getContext("2d");
+        if (!pageContext) throw new Error("The PDF page canvas could not be created");
+        pageContext.fillStyle = "#ffffff";
+        pageContext.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+        pageContext.drawImage(scoreCanvas, 0, sourceY, scoreCanvas.width, pageCanvas.height, 0, 0, pageCanvas.width, pageCanvas.height);
+        const y = top + headingHeight + 4;
+        const naturalHeight = contentWidth * pageCanvas.height / pageCanvas.width;
+        const renderedHeight = Math.min(naturalHeight, pageHeight - y - 14);
+        pdf.addImage(pageCanvas, "PNG", marginX, y, contentWidth, renderedHeight, `systems-${pageStart}`, "FAST");
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        pdf.setTextColor(95, 86, 99);
+        pdf.text(`ScoreCraft piano transcription  |  Page ${Math.floor(pageStart / systemsPerPage) + 1}`, pageWidth / 2, pageHeight - 7, { align: "center" });
+      }
+
+      const filename = `${title.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "piano-score"}.pdf`;
+      const pdfBlob = pdf.output("blob");
+      const pdfUrl = URL.createObjectURL(pdfBlob);
+      const link = document.createElement("a");
+      link.href = pdfUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(pdfUrl), 30_000);
+      document.documentElement.dataset.scorecraftPdfPages = String(pdf.getNumberOfPages());
+      document.documentElement.dataset.scorecraftPdfBytes = String(pdfBlob.size);
+      setMessage(`PDF exported: ${pdf.getNumberOfPages()} A4 pages with ${systems.length} aligned grand-staff systems`);
+    } catch (error) {
+      setMessage(error instanceof Error ? `PDF export failed: ${error.message}` : "PDF export failed");
+    } finally {
+      if (paper) paper.style.transform = previousTransform;
+    }
   }
 
   const currentTime = Math.round((playhead / 100) * duration);
