@@ -85,51 +85,79 @@ export function localYouTubeAudioPlugin(): Plugin {
           if (!format) throw new Error("No browser-compatible audio track was found for this video.");
           if ((format.filesize ?? format.filesize_approx ?? 0) > MAX_AUDIO_BYTES) throw new Error("This audio track is larger than 150 MB.");
 
-          const process = youtubeDl.exec(canonicalUrl, {
-            output: "-",
-            format: format.format_id,
-            noPlaylist: true,
-            ignoreConfig: true,
-            noWarnings: true,
-            noProgress: true,
-            socketTimeout: 20,
-            retries: 2,
-            jsRuntimes: "node",
-          }, { timeout: 180_000, windowsHide: true });
-
           let bytes = 0;
-          let started = false;
-          let stderr = "";
-          process.stderr?.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-2000); });
-          process.stdout?.on("data", (chunk: Buffer) => {
-            bytes += chunk.length;
-            if (bytes > MAX_AUDIO_BYTES) {
-              process.kill("SIGKILL");
-              if (!response.headersSent) sendJson(response, 413, "The downloaded audio exceeded 150 MB.");
+          let activeProcess: ReturnType<typeof youtubeDl.exec> | null = null;
+          let responseStarted = false;
+          let clientClosed = false;
+          const maxDownloadAttempts = 3;
+
+          const runDownload = (attempt: number) => {
+            if (clientClosed) return;
+            const process = youtubeDl.exec(canonicalUrl, {
+              output: "-",
+              format: format.format_id,
+              noPlaylist: true,
+              ignoreConfig: true,
+              noWarnings: true,
+              noProgress: true,
+              socketTimeout: 20,
+              retries: 3,
+              extractorRetries: 3,
+              jsRuntimes: "node",
+            }, { timeout: 180_000, windowsHide: true });
+            activeProcess = process;
+            let stderr = "";
+            let settled = false;
+
+            const finishAttempt = (success: boolean, detail = "") => {
+              if (settled) return;
+              settled = true;
+              if (success && responseStarted) {
+                response.end();
+                return;
+              }
+              if (!response.headersSent && attempt + 1 < maxDownloadAttempts) {
+                setTimeout(() => runDownload(attempt + 1), 300 * (attempt + 1));
+                return;
+              }
+              const friendlyDetail = /403|forbidden/i.test(detail)
+                ? "YouTube temporarily rejected the audio download after 3 attempts. Try Transcribe piano again."
+                : "YouTube could not provide this video's audio after 3 attempts.";
+              if (!response.headersSent) sendJson(response, 502, friendlyDetail);
               else response.destroy();
-              return;
-            }
-            if (!started) {
-              started = true;
-              response.statusCode = 200;
-              response.setHeader("Content-Type", "audio/mp4");
-              response.setHeader("Cache-Control", "no-store");
-              response.setHeader("Content-Disposition", "inline; filename=scorecraft-youtube.m4a");
-              response.setHeader("X-ScoreCraft-Title", encodeURIComponent(metadata.title || "YouTube piano transcription"));
-              response.setHeader("X-ScoreCraft-Duration", String(metadata.duration));
-            }
-            response.write(chunk);
+            };
+
+            process.stderr?.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-2000); });
+            process.stdout?.on("data", (chunk: Buffer) => {
+              bytes += chunk.length;
+              if (bytes > MAX_AUDIO_BYTES) {
+                settled = true;
+                process.kill("SIGKILL");
+                if (!response.headersSent) sendJson(response, 413, "The downloaded audio exceeded 150 MB.");
+                else response.destroy();
+                return;
+              }
+              if (!responseStarted) {
+                responseStarted = true;
+                response.statusCode = 200;
+                response.setHeader("Content-Type", "audio/mp4");
+                response.setHeader("Cache-Control", "no-store");
+                response.setHeader("Content-Disposition", "inline; filename=scorecraft-youtube.m4a");
+                response.setHeader("X-ScoreCraft-Title", encodeURIComponent(metadata.title || "YouTube piano transcription"));
+                response.setHeader("X-ScoreCraft-Duration", String(metadata.duration));
+                response.setHeader("X-ScoreCraft-Download-Attempt", String(attempt + 1));
+              }
+              response.write(chunk);
+            });
+            process.once("error", (error) => finishAttempt(false, error.message));
+            process.once("close", (code) => finishAttempt(code === 0, stderr));
+          };
+
+          runDownload(0);
+          response.once("close", () => {
+            clientClosed = true;
+            if (activeProcess && !activeProcess.killed) activeProcess.kill("SIGKILL");
           });
-          process.once("error", (error) => {
-            if (!response.headersSent) sendJson(response, 502, error.message);
-            else response.destroy(error);
-          });
-          process.once("close", (code) => {
-            if (code === 0 && started) response.end();
-            else if (!response.headersSent) sendJson(response, 502, stderr.trim() || "YouTube could not provide this video's audio.");
-            else response.destroy();
-          });
-          response.once("close", () => { if (!process.killed) process.kill("SIGKILL"); });
         } catch (error) {
           const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";
           sendJson(response, message.includes("too large") ? 413 : 400, message);

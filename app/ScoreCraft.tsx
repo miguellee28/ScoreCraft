@@ -376,7 +376,7 @@ function PianoSystem({
     let cancelled = false;
 
     async function drawStaff() {
-      const { Accidental, Annotation, Dot, Formatter, Renderer, Stave, StaveConnector, StaveNote } = await import("vexflow");
+      const { Accidental, Annotation, Dot, Formatter, Renderer, Stave, StaveConnector, StaveNote, StaveTie } = await import("vexflow");
       if (cancelled || !target) return;
       target.replaceChildren();
 
@@ -435,10 +435,13 @@ function PianoSystem({
         const starts = [...groups.keys()].sort((a, b) => a - b);
         const tickables: InstanceType<typeof StaveNote>[] = [];
         const indexes: Array<number | null> = [];
+        const ties: Array<InstanceType<typeof StaveTie>> = [];
         let cursor = measureStart;
 
         const addDuration = (beats: number, rest: boolean, group: Array<Note & { index: number }> = []) => {
           let remaining = Math.round(beats * 4) / 4;
+          let previousSegment: InstanceType<typeof StaveNote> | null = null;
+          let segmentIndex = 0;
           while (remaining >= 0.25) {
             const [used, duration, dotted] = durationFor(remaining);
             const sorted = [...group].sort((a, b) => a.midi - b.midi);
@@ -452,31 +455,49 @@ function PianoSystem({
             });
             if (dotted) Dot.buildAndAttach([staveNote], { all: true });
             if (!rest) {
-              sorted.forEach((note, keyIndex) => {
-                const accidental = accidentalNames[((note.midi % 12) + 12) % 12];
-                if (accidental) staveNote.addModifier(new Accidental(accidental), keyIndex);
-              });
-              const chord = clef === "treble" ? sorted.find((note) => note.chord)?.chord : undefined;
-              if (chord) staveNote.addModifier(new Annotation(chord).setVerticalJustification("top").setJustification("left"), 0);
+              if (segmentIndex === 0) {
+                sorted.forEach((note, keyIndex) => {
+                  const accidental = accidentalNames[((note.midi % 12) + 12) % 12];
+                  if (accidental) staveNote.addModifier(new Accidental(accidental), keyIndex);
+                });
+                const chord = clef === "treble" ? sorted.find((note) => note.chord)?.chord : undefined;
+                if (chord) staveNote.addModifier(new Annotation(chord).setVerticalJustification("top").setJustification("left"), 0);
+              }
+              if (previousSegment) {
+                const tiedIndexes = sorted.map((_, keyIndex) => keyIndex);
+                ties.push(new StaveTie({
+                  firstNote: previousSegment,
+                  lastNote: staveNote,
+                  firstIndexes: tiedIndexes,
+                  lastIndexes: tiedIndexes,
+                }));
+              }
             }
             tickables.push(staveNote);
             indexes.push(rest ? null : sorted[0]?.index ?? null);
+            previousSegment = rest ? null : staveNote;
+            segmentIndex += 1;
             remaining -= used;
-            if (!rest) break;
           }
         };
 
         starts.forEach((onset, groupIndex) => {
           if (onset > cursor) addDuration(onset - cursor, true);
           const nextOnset = starts[groupIndex + 1] ?? measureEnd;
-          const span = Math.max(0.25, nextOnset - onset);
-          addDuration(Math.min(span, measureEnd - onset), false, groups.get(onset) ?? []);
-          cursor = onset + durationFor(Math.min(span, measureEnd - onset))[0];
+          const group = groups.get(onset) ?? [];
+          const available = Math.max(0.25, Math.min(nextOnset - onset, measureEnd - onset));
+          const detectedDuration = Math.max(0.25, ...group.map((note) => note.beats));
+          let engravedDuration = Math.min(available, detectedDuration);
+          if (available - engravedDuration <= 0.25) engravedDuration = available;
+          engravedDuration = Math.max(0.25, Math.round(engravedDuration * 4) / 4);
+          addDuration(engravedDuration, false, group);
+          cursor = onset + engravedDuration;
         });
         if (cursor < measureEnd) addDuration(measureEnd - cursor, true);
         if (!tickables.length) addDuration(4, true);
         const before = target.querySelectorAll(".vf-stavenote").length;
         Formatter.FormatAndDraw(context, stave, tickables, { autoBeam: true, alignRests: true });
+        ties.forEach((tie) => tie.setContext(context).draw());
         bindRenderedNotes(before, indexes);
       };
 
