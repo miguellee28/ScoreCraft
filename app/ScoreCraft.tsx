@@ -23,6 +23,9 @@ type Track = {
   solo: boolean;
 };
 
+const TREBLE_CLEF = "\u{1D11E}";
+const BASS_CLEF = "\u{1D122}";
+
 const melody = [
   67, 69, 71, 72, 74, 72, 71, 69, 67, 64, 67, 69, 71, 69, 67, 66,
   67, 69, 71, 74, 76, 74, 72, 71, 69, 71, 72, 69, 67, 66, 64, 67,
@@ -139,8 +142,18 @@ async function transcribeFile(file: File): Promise<Note[]> {
   }
 }
 
-function StaffNote({ note, index, selected, onSelect }: { note: Note; index: number; selected: boolean; onSelect: () => void }) {
-  const top = 49 - (note.midi - 60) * 2.35;
+function staffTop(midi: number, clef: string) {
+  const pitchClass = ((midi % 12) + 12) % 12;
+  const diatonicOffsets = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
+  const octave = Math.floor(midi / 12) - 1;
+  const diatonicPitch = octave * 7 + diatonicOffsets[pitchClass];
+  const bottomLine = clef === BASS_CLEF ? 3 * 7 + 4 : 4 * 7 + 2;
+  return 60 - (diatonicPitch - bottomLine) * 5;
+}
+
+function StaffNote({ note, index, clef, selected, onSelect }: { note: Note; index: number; clef: string; selected: boolean; onSelect: () => void }) {
+  const top = staffTop(note.midi, clef);
+  const hasLedger = top < 16 || top > 64;
   return (
     <button
       className={`score-note ${selected ? "selected" : ""}`}
@@ -149,6 +162,7 @@ function StaffNote({ note, index, selected, onSelect }: { note: Note; index: num
       title={`${noteLabel(note.midi)} · ${note.beats} beat${note.beats === 1 ? "" : "s"}`}
       aria-label={`Select ${noteLabel(note.midi)}`}
     >
+      {hasLedger && <span className="ledger-line" />}
       <span className="note-head" />
       {note.beats <= 1 && <span className={`note-stem ${index % 5 === 4 ? "down" : ""}`} />}
       {note.beats <= 0.5 && <span className="note-flag">›</span>}
@@ -158,6 +172,7 @@ function StaffNote({ note, index, selected, onSelect }: { note: Note; index: num
 
 function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedNote: string; onSelect: (id: string) => void }) {
   const visibleNotes = track.notes.slice(0, 32);
+  const clef = track.name === "Cello" || track.name === "Double bass" ? BASS_CLEF : TREBLE_CLEF;
   return (
     <div className="staff-row" style={{ "--track": track.color } as CSSProperties}>
       <div className="staff-label">
@@ -165,7 +180,8 @@ function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedN
         <strong>{track.name}</strong>
       </div>
       <div className="staff-music">
-        <span className="clef">{track.clef}</span>
+        <span className="staff-lines" aria-hidden="true" />
+        <span className="clef">{clef}</span>
         <span className="key-signature">♯</span>
         <span className="time-signature"><b>4</b><b>4</b></span>
         <div className="notes-grid">
@@ -174,6 +190,7 @@ function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedN
               key={`${track.id}-${index}`}
               note={note}
               index={index}
+              clef={clef}
               selected={selectedNote === `${track.id}-${index}`}
               onSelect={() => onSelect(`${track.id}-${index}`)}
             />
@@ -208,7 +225,8 @@ export function ScoreCraft() {
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const duration = 48;
 
-  const sourceReady = Boolean(file) || /youtu(?:\.be|be\.com)/i.test(youtubeUrl);
+  const validYoutubeUrl = /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)[\w-]{6,}/i.test(youtubeUrl.trim());
+  const sourceReady = Boolean(file);
   const selected = useMemo(() => {
     const [trackId, index] = selectedNote.split("-").map(Number);
     return tracks.find((track) => track.id === trackId)?.notes[index];
@@ -221,8 +239,8 @@ export function ScoreCraft() {
 
   function chooseFile(next: File | undefined) {
     if (!next) return;
-    if (!next.type.startsWith("audio/") && !/\.(mp3|wav|m4a|aac|ogg)$/i.test(next.name)) {
-      setMessage("Choose an MP3, WAV, M4A, AAC, or OGG audio file");
+    if (!next.type.startsWith("audio/") && !next.type.startsWith("video/") && !/\.(mp3|wav|m4a|aac|ogg|mp4|webm|mov)$/i.test(next.name)) {
+      setMessage("Choose an audio or video file (MP3, WAV, M4A, MP4, or WebM)");
       return;
     }
     setFile(next);
@@ -237,7 +255,9 @@ export function ScoreCraft() {
 
   async function analyzeSource() {
     if (!sourceReady) {
-      setMessage(sourceMode === "upload" ? "Add an audio file first" : "Enter a valid YouTube link first");
+      setMessage(sourceMode === "youtube"
+        ? "YouTube blocks direct audio access. Add the audio or video file from that recording first."
+        : "Add an audio or video file first");
       return;
     }
     setAnalysis({ progress: 8, label: "Separating melody from accompaniment" });
@@ -271,7 +291,7 @@ export function ScoreCraft() {
     }
     setAnalysis({ progress: 100, label: "Score ready" });
     setTimeout(() => setAnalysis(null), 650);
-    setMessage(file ? `Transcribed ${file.name}` : "YouTube arrangement ready to edit");
+    setMessage(notes.length >= 4 ? `Transcribed ${file?.name}` : "No clear melody was detected. Try a recording with less accompaniment.");
   }
 
   function stopPlayback(reset = false) {
@@ -344,7 +364,7 @@ export function ScoreCraft() {
 
   function addInstrument(preset: typeof instrumentPresets[number]) {
     const [name, abbreviation, clef, color, transpose] = preset;
-    const id = Math.max(...tracks.map((track) => track.id)) + 1;
+    const id = Math.max(0, ...tracks.map((track) => track.id)) + 1;
     setTracks((current) => [...current, {
       id, name, abbreviation, clef, color, volume: 60, muted: false, solo: false,
       notes: melody.map((midi) => ({ midi: midi + transpose, beats: 0.5 })),
@@ -353,13 +373,53 @@ export function ScoreCraft() {
     setMessage(`${name} part added`);
   }
 
+  function removeInstrument(id: number) {
+    const removed = tracks.find((track) => track.id === id);
+    setTracks((current) => current.filter((track) => track.id !== id));
+    if (selectedNote.startsWith(`${id}-`)) setSelectedNote("");
+    setMessage(`${removed?.name ?? "Instrument"} removed`);
+  }
+
+  function xmlEscape(value: string) {
+    return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character] ?? character);
+  }
+
+  function musicXmlPitch(midi: number) {
+    const pitches = [
+      ["C", 0], ["C", 1], ["D", 0], ["E", -1], ["E", 0], ["F", 0],
+      ["F", 1], ["G", 0], ["A", -1], ["A", 0], ["B", -1], ["B", 0],
+    ] as const;
+    const [step, alter] = pitches[((midi % 12) + 12) % 12];
+    return `<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ""}<octave>${Math.floor(midi / 12) - 1}</octave></pitch>`;
+  }
+
   function exportMusicXml() {
-    const partList = tracks.map((track) => `<score-part id="P${track.id}"><part-name>${track.name}</part-name></score-part>`).join("");
-    const parts = tracks.map((track) => `<part id="P${track.id}"><measure number="1">${track.notes.slice(0, 24).map((note) => {
-      const name = noteNames[note.midi % 12].replace(/[♯♭]/, "");
-      return `<note><pitch><step>${name}</step><octave>${Math.floor(note.midi / 12) - 1}</octave></pitch><duration>${Math.max(1, note.beats * 2)}</duration></note>`;
-    }).join("")}</measure></part>`).join("");
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0"><work><work-title>${title}</work-title></work><part-list>${partList}</part-list>${parts}</score-partwise>`;
+    const divisions = 4;
+    const partList = tracks.map((track) => `<score-part id="P${track.id}"><part-name>${xmlEscape(track.name)}</part-name><part-abbreviation>${xmlEscape(track.abbreviation)}</part-abbreviation></score-part>`).join("");
+    const parts = tracks.map((track) => {
+      const measures: string[] = [];
+      let measure: string[] = [];
+      let beats = 0;
+      const flush = () => {
+        const number = measures.length + 1;
+        const bassClef = track.name === "Cello" || track.name === "Double bass";
+        const attributes = number === 1 ? `<attributes><divisions>${divisions}</divisions><key><fifths>1</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>${bassClef ? "F" : "G"}</sign><line>${bassClef ? 4 : 2}</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>` : "";
+        if (beats < 4) measure.push(`<note><rest/><duration>${Math.round((4 - beats) * divisions)}</duration><type>${4 - beats >= 2 ? "half" : "quarter"}</type></note>`);
+        measures.push(`<measure number="${number}">${attributes}${measure.join("")}</measure>`);
+        measure = [];
+        beats = 0;
+      };
+      track.notes.forEach((note) => {
+        if (beats + note.beats > 4) flush();
+        const type = note.beats >= 4 ? "whole" : note.beats >= 2 ? "half" : note.beats >= 1 ? "quarter" : note.beats >= 0.5 ? "eighth" : "16th";
+        measure.push(`<note>${musicXmlPitch(note.midi)}<duration>${Math.max(1, Math.round(note.beats * divisions))}</duration><type>${type}</type></note>`);
+        beats += note.beats;
+        if (beats >= 4) flush();
+      });
+      if (measure.length || !measures.length) flush();
+      return `<part id="P${track.id}">${measures.join("")}</part>`;
+    }).join("");
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n<score-partwise version="4.0"><work><work-title>${xmlEscape(title)}</work-title></work><identification><creator type="composer">${xmlEscape(composer)}</creator><encoding><software>ScoreCraft</software></encoding></identification><part-list>${partList}</part-list>${parts}</score-partwise>`;
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([xml], { type: "application/vnd.recordare.musicxml+xml" }));
     link.download = `${title.replace(/\s+/g, "-").toLowerCase() || "score"}.musicxml`;
@@ -410,7 +470,7 @@ export function ScoreCraft() {
 
           {sourceMode === "upload" ? (
             <div className={`dropzone ${file ? "has-file" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} onClick={() => fileInput.current?.click()}>
-              <input ref={fileInput} type="file" accept="audio/*,.mp3,.m4a" onChange={(event: ChangeEvent<HTMLInputElement>) => chooseFile(event.target.files?.[0])} />
+              <input ref={fileInput} type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm" onChange={(event: ChangeEvent<HTMLInputElement>) => chooseFile(event.target.files?.[0])} />
               <span className="upload-symbol">♫</span>
               {file ? <><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)} MB · ready</span></> : <><strong>Drop your recording here</strong><span>or choose an audio file</span><small>MP3, WAV, M4A · up to 150 MB</small></>}
             </div>
@@ -418,7 +478,9 @@ export function ScoreCraft() {
             <div className="youtube-box">
               <label htmlFor="youtube">YouTube link</label>
               <div className="url-input"><span>▶</span><input id="youtube" placeholder="https://youtu.be/…" value={youtubeUrl} onChange={(event) => setYoutubeUrl(event.target.value)} /></div>
-              <p>Paste a public performance or melody link.</p>
+              <p className={youtubeUrl && !validYoutubeUrl ? "input-error" : ""}>{youtubeUrl && !validYoutubeUrl ? "Enter a complete YouTube video link." : "YouTube blocks direct audio access. Add the recording file below."}</p>
+              <button className="source-file-button" onClick={() => fileInput.current?.click()}>{file ? `✓ ${file.name}` : "Choose audio or video file"}</button>
+              <input ref={sourceMode === "youtube" ? fileInput : undefined} className="source-file-input" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm" onChange={(event: ChangeEvent<HTMLInputElement>) => chooseFile(event.target.files?.[0])} />
             </div>
           )}
 
@@ -468,8 +530,9 @@ export function ScoreCraft() {
               </div>
               <div className="chord-line"><span>G</span><span>D/F♯</span><span>Em</span><span>Cmaj7</span><span>G/B</span><span>Am7</span><span>D</span></div>
               <div className="staff-system">
-                <span className="system-brace">{tracks.length > 2 ? "⎧" : "{"}</span>
+                <span className="system-brace" aria-hidden="true">{"{"}</span>
                 {tracks.map((track) => <ScoreStaff key={track.id} track={track} selectedNote={selectedNote} onSelect={setSelectedNote} />)}
+                {!tracks.length && <div className="empty-score">Add an instrument to start a new score.</div>}
               </div>
               <div className="page-footer"><span>ScoreCraft transcription</span><span>1</span></div>
             </div>
@@ -493,7 +556,7 @@ export function ScoreCraft() {
               <div className="mixer-track" key={track.id}>
                 <div className="instrument-avatar" style={{ background: track.color }}>{track.abbreviation.slice(0, 2)}</div>
                 <div className="track-main">
-                  <div className="track-name"><b>{track.name}</b><button aria-label={`More options for ${track.name}`}>•••</button></div>
+                  <div className="track-name"><b>{track.name}</b><button className="remove-track" onClick={() => removeInstrument(track.id)} aria-label={`Remove ${track.name}`} title={`Remove ${track.name}`}>×</button></div>
                   <div className="track-controls">
                     <button className={track.muted ? "active" : ""} onClick={() => updateTrack(track.id, { muted: !track.muted })}>M</button>
                     <button className={track.solo ? "active solo" : ""} onClick={() => updateTrack(track.id, { solo: !track.solo })}>S</button>

@@ -87,6 +87,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .youtube-box { min-height: 164px; border: 1px solid var(--line); border-radius: 9px; background: #fffefd; padding: 20px 14px; }
 .youtube-box label { display: block; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
 .youtube-box p { color: #948d95; font-size: 10px; margin: 10px 0 0; }
+.youtube-box p.input-error { color: #b34535; }
+.source-file-button { width: 100%; margin-top: 12px; border: 1px solid #cfc6ce; border-radius: 6px; background: #f8f4f8; color: var(--aubergine); padding: 9px; font-size: 10px; font-weight: 700; cursor: pointer; }
+.source-file-button:hover { background: #f1e9f3; }
+.source-file-input { display: none; }
 .url-input { display: flex; align-items: center; border: 1px solid #d8d2d6; background: white; border-radius: 6px; padding: 0 9px; }
 .url-input span { color: #d94f45; font-size: 11px; }
 .url-input input { width: 100%; border: 0; padding: 10px 8px; outline: 0; background: transparent; font-size: 11px; }
@@ -130,27 +134,33 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .score-meta { display: flex; justify-content: space-between; font: italic 11px Georgia, serif; margin-top: 22px; }
 .chord-line { height: 20px; margin-left: 115px; display: grid; grid-template-columns: repeat(7, 1fr); font: italic 11px Georgia, serif; }
 .staff-system { position: relative; }
-.system-brace { position: absolute; left: 84px; top: 45px; font: 135px Georgia, serif; transform: scaleX(.5); transform-origin: left center; z-index: 2; }
+.system-brace { position: absolute; left: 85px; top: 20px; bottom: 25px; width: 10px; overflow: hidden; color: transparent; border-left: 2px solid #393438; z-index: 2; }
+.system-brace::before, .system-brace::after { content: ""; position: absolute; left: 0; width: 8px; height: 2px; background: #393438; }
+.system-brace::before { top: 0; }
+.system-brace::after { bottom: 0; }
+.empty-score { margin: 38px 0 50px 90px; border: 1px dashed #c9c1c7; border-radius: 7px; padding: 28px; color: #817982; text-align: center; font: italic 12px Georgia, serif; }
 
 .staff-row { position: relative; display: grid; grid-template-columns: 78px 1fr; align-items: center; min-height: 112px; }
 .staff-label { text-align: right; padding-right: 14px; font: 10px Georgia, serif; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .track-swatch { width: 5px; height: 5px; border-radius: 50%; background: var(--track); }
-.staff-music { height: 86px; position: relative; background: repeating-linear-gradient(to bottom, transparent 0, transparent 13px, #393438 13.6px, transparent 14.3px); background-size: 100% 56px; background-position: 0 15px; }
+.staff-music { height: 86px; position: relative; }
+.staff-lines { position: absolute; left: 0; right: 0; top: 20px; height: 41px; background: repeating-linear-gradient(to bottom, #393438 0 1px, transparent 1px 10px); pointer-events: none; }
 .staff-music::before, .staff-music::after { content: ""; position: absolute; top: 28px; height: 56px; width: 1px; background: #393438; }
-.staff-music::before { left: 0; }
-.staff-music::after { right: 0; }
-.clef { position: absolute; left: 8px; top: 13px; font: 56px "Times New Roman", serif; line-height: 1; z-index: 2; }
-.key-signature { position: absolute; left: 52px; top: 29px; font: 25px Georgia, serif; }
-.time-signature { position: absolute; left: 76px; top: 28px; display: flex; flex-direction: column; font: 16px/14px Georgia, serif; }
+.staff-music::before { left: 0; top: 20px; height: 41px; }
+.staff-music::after { right: 0; top: 20px; height: 41px; }
+.clef { position: absolute; left: 8px; top: 9px; width: 42px; text-align: center; font: 52px/1 "Segoe UI Symbol", "Noto Music", serif; z-index: 2; }
+.key-signature { display: none; }
+.time-signature { position: absolute; left: 68px; top: 20px; display: flex; flex-direction: column; font: 17px/20px Georgia, serif; z-index: 2; }
 .notes-grid { position: absolute; left: 105px; right: 0; top: 0; bottom: 0; display: grid; grid-template-columns: repeat(32, 1fr); align-items: start; }
 .score-note { position: relative; height: 86px; border: 0; background: transparent; padding: 0; cursor: pointer; min-width: 0; }
 .score-note::before { content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%; top: calc(var(--note-top) - 6px); left: 50%; transform: translateX(-50%); background: transparent; transition: .15s; }
 .score-note:hover::before, .score-note.selected::before { background: #e8664a2d; }
 .note-head { position: absolute; width: 9px; height: 6px; border-radius: 50%; background: #252126; top: var(--note-top); left: calc(50% - 4px); transform: rotate(-15deg); z-index: 2; }
+.ledger-line { position: absolute; width: 17px; height: 1px; left: 50%; top: calc(var(--note-top) + 3px); transform: translateX(-50%); background: #252126; z-index: 1; }
 .note-stem { position: absolute; width: 1.2px; height: 24px; background: #252126; left: calc(50% + 4px); top: calc(var(--note-top) - 20px); }
 .note-stem.down { left: calc(50% - 4px); top: var(--note-top); }
 .note-flag { position: absolute; left: calc(50% + 3px); top: calc(var(--note-top) - 23px); transform: rotate(30deg); font: 14px Georgia, serif; }
-.bar-line { position: absolute; top: 29px; height: 56px; width: 1px; background: #4c484b; }
+.bar-line { position: absolute; top: 20px; height: 41px; width: 1px; background: #4c484b; }
 .page-footer { display: flex; justify-content: space-between; border-top: 1px solid #d6d0c8; margin-top: 18px; padding-top: 8px; color: #9a938d; font: 9px Georgia, serif; }
 
 .transport { height: 59px; flex: 0 0 59px; display: flex; align-items: center; gap: 10px; padding: 0 16px; background: #faf9f6; border-top: 1px solid var(--line); box-shadow: 0 -4px 14px #3c323608; }
@@ -177,6 +187,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .track-name { display: flex; justify-content: space-between; align-items: center; }
 .track-name b { font-size: 11px; }
 .track-name button { border: 0; background: transparent; color: #aaa3a9; letter-spacing: 1px; cursor: pointer; }
+.track-name .remove-track { width: 24px; height: 24px; border-radius: 4px; padding: 0; color: #8b5960; font-size: 17px; line-height: 1; }
+.track-name .remove-track:hover { background: #f4e6e7; color: #9f2735; }
 .track-controls { display: grid; grid-template-columns: 21px 21px 1fr 22px; align-items: center; gap: 3px; margin-top: 7px; }
 .track-controls button { width: 20px; height: 19px; border: 1px solid #ddd7da; background: transparent; border-radius: 4px; color: #928b92; font-size: 8px; font-weight: 750; cursor: pointer; }
 .track-controls button.active { color: white; background: #7f747e; border-color: #7f747e; }
@@ -229,11 +241,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 }
 
 @media print {
-  @page { size: A4 landscape; margin: 10mm; }
+  @page { size: A4 portrait; margin: 0; }
+  html, body { width: 210mm; min-height: 297mm; }
   body { background: white; }
   .topbar, .source-panel, .mixer-panel, .notation-toolbar, .transport { display: none !important; }
-  .workspace, .editor-panel, .canvas-scroll { display: block; background: white; overflow: visible; padding: 0; }
-  .score-paper { box-shadow: none; transform: none !important; margin: 0 auto !important; width: 100%; min-height: auto; }
+  .app-shell, .workspace, .editor-panel, .canvas-scroll { display: block; min-height: 0; height: auto; background: white; overflow: visible; padding: 0; }
+  .score-paper { box-shadow: none; transform: none !important; margin: 0 !important; width: 210mm; min-height: 297mm; padding: 18mm 14mm 14mm; overflow: visible; }
+  .paper-texture { display: none; }
+  .score-heading input { color: #211c25; }
+  .staff-row { break-inside: avoid; }
+  .page-footer { position: absolute; left: 14mm; right: 14mm; bottom: 10mm; }
   .score-note.selected::before { display: none; }
 }
 
