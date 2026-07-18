@@ -134,15 +134,30 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .score-meta { display: flex; justify-content: space-between; font: italic 11px Georgia, serif; margin-top: 22px; }
 .chord-line { height: 20px; margin-left: 115px; display: grid; grid-template-columns: repeat(7, 1fr); font: italic 11px Georgia, serif; }
 .staff-system { position: relative; }
+.piano-grand-system { break-inside: avoid; min-height: 218px; margin-bottom: 8px; align-items: start; }
+.piano-grand-system .staff-label { padding-top: 56px; }
+.engraved-grand-staff { min-width: 0; height: 205px; overflow: visible; }
+.engraved-grand-staff svg { display: block; width: 100%; height: 205px; overflow: visible; }
+.engraved-grand-staff .vf-stavenote { cursor: pointer; }
+.engraved-grand-staff .vf-stavenote.selected path,
+.engraved-grand-staff .vf-stavenote.selected line,
+.engraved-grand-staff .vf-stavenote.selected text { fill: var(--plum); stroke: var(--plum); }
+.piano-score { position: relative; }
 .system-brace { position: absolute; left: 85px; top: 20px; bottom: 25px; width: 10px; overflow: hidden; color: transparent; border-left: 2px solid #393438; z-index: 2; }
 .system-brace::before, .system-brace::after { content: ""; position: absolute; left: 0; width: 8px; height: 2px; background: #393438; }
-.system-brace::before { top: 0; }
-.system-brace::after { bottom: 0; }
+.system-brace::before { top: 0; background: transparent; border-top: 2px solid #393438; }
+.system-brace::after { bottom: 0; background: transparent; border-bottom: 2px solid #393438; }
 .empty-score { margin: 38px 0 50px 90px; border: 1px dashed #c9c1c7; border-radius: 7px; padding: 28px; color: #817982; text-align: center; font: italic 12px Georgia, serif; }
 
 .staff-row { position: relative; display: grid; grid-template-columns: 78px 1fr; align-items: center; min-height: 112px; }
 .staff-label { text-align: right; padding-right: 14px; font: 10px Georgia, serif; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .track-swatch { width: 5px; height: 5px; border-radius: 50%; background: var(--track); }
+.engraved-staff { min-width: 0; height: 104px; overflow: visible; }
+.engraved-staff svg { display: block; width: 100%; height: 104px; overflow: visible; }
+.engraved-staff .vf-stavenote { cursor: pointer; }
+.engraved-staff .vf-stavenote.selected path,
+.engraved-staff .vf-stavenote.selected line,
+.engraved-staff .vf-stavenote.selected polygon { fill: var(--coral) !important; stroke: var(--coral) !important; }
 .staff-music { height: 86px; position: relative; }
 .staff-lines { position: absolute; left: 0; right: 0; top: 20px; height: 41px; background: repeating-linear-gradient(to bottom, #393438 0 1px, transparent 1px 10px); pointer-events: none; }
 .staff-music::before, .staff-music::after { content: ""; position: absolute; top: 28px; height: 56px; width: 1px; background: #393438; }
@@ -170,6 +185,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .time-display { width: 81px; font-size: 10px; font-variant-numeric: tabular-nums; }
 .time-display b { font-size: 11px; }
 .time-display span { color: #999298; margin-left: 3px; }
+.playback-source { white-space: nowrap; border: 1px solid #ded7df; border-radius: 999px; padding: 4px 7px; color: var(--aubergine); background: #f3edf4; font-size: 8px; font-weight: 700; }
 .timeline { position: relative; flex: 1; height: 18px; }
 .timeline input { width: 100%; opacity: 0; position: absolute; inset: 0; z-index: 2; cursor: pointer; }
 .timeline::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 3px; border-radius: 4px; background: #ddd7da; }
@@ -241,17 +257,22 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 }
 
 @media print {
-  @page { size: A4 portrait; margin: 0; }
-  html, body { width: 210mm; min-height: 297mm; }
+  @page { size: A4 portrait; margin: 14mm 12mm; }
+  html, body { width: auto; min-height: 0; }
   body { background: white; }
+  *, *::before, *::after { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   .topbar, .source-panel, .mixer-panel, .notation-toolbar, .transport { display: none !important; }
   .app-shell, .workspace, .editor-panel, .canvas-scroll { display: block; min-height: 0; height: auto; background: white; overflow: visible; padding: 0; }
-  .score-paper { box-shadow: none; transform: none !important; margin: 0 !important; width: 210mm; min-height: 297mm; padding: 18mm 14mm 14mm; overflow: visible; }
+  .score-paper { box-shadow: none; transform: none !important; margin: 0 !important; width: auto; min-height: 0; padding: 0; overflow: visible; }
   .paper-texture { display: none; }
   .score-heading input { color: #211c25; }
   .staff-row { break-inside: avoid; }
-  .page-footer { position: absolute; left: 14mm; right: 14mm; bottom: 10mm; }
-  .score-note.selected::before { display: none; }
+  .piano-system { break-inside: avoid; }
+  .piano-system:nth-child(3n):not(:last-child) { break-after: page; }
+  .engraved-staff .vf-stavenote.selected path,
+  .engraved-staff .vf-stavenote.selected line,
+  .engraved-staff .vf-stavenote.selected polygon { fill: #211c25 !important; stroke: #211c25 !important; }
+  .page-footer { position: static; margin-top: 12mm; }
 }
 
 @media (prefers-reduced-motion: reduce) {

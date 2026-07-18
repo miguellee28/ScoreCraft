@@ -10,7 +10,15 @@ import {
   useState,
 } from "react";
 
-type Note = { midi: number; beats: number; velocity?: number };
+type Note = {
+  midi: number;
+  startBeat: number;
+  beats: number;
+  velocity?: number;
+  startSeconds?: number;
+  durationSeconds?: number;
+  chord?: string;
+};
 type Track = {
   id: number;
   name: string;
@@ -31,48 +39,150 @@ const melody = [
   67, 69, 71, 74, 76, 74, 72, 71, 69, 71, 72, 69, 67, 66, 64, 67,
 ];
 
+function sequentialNotes(midis: number[]) {
+  let startBeat = 0;
+  return midis.map((midi, index) => {
+    const beats = index % 7 === 6 ? 1 : 0.5;
+    const note = { midi, startBeat, beats };
+    startBeat += beats;
+    return note;
+  });
+}
+
+type HarmonyChord = { root: number; tones: Set<number>; label: string };
+
+const harmonyPitchNames = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
+const majorKeyProfile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const minorKeyProfile = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+function inferChordProgression(notes: Note[]) {
+  const histogram = Array.from({ length: 12 }, () => 0);
+  notes.forEach((note) => {
+    histogram[((note.midi % 12) + 12) % 12] += ((note.velocity ?? 64) / 127) * Math.min(2, note.beats);
+  });
+  let tonic = 0;
+  let minor = false;
+  let keyScore = Number.NEGATIVE_INFINITY;
+  for (let candidate = 0; candidate < 12; candidate += 1) {
+    for (const mode of [false, true]) {
+      const profile = mode ? minorKeyProfile : majorKeyProfile;
+      const score = histogram.reduce((sum, weight, pitchClass) => (
+        sum + weight * profile[(pitchClass - candidate + 12) % 12]
+      ), 0);
+      if (score > keyScore) {
+        tonic = candidate;
+        minor = mode;
+        keyScore = score;
+      }
+    }
+  }
+
+  const scale = minor ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11];
+  const candidates: HarmonyChord[] = scale.map((interval, degree) => {
+    const root = (tonic + interval) % 12;
+    const third = (tonic + scale[(degree + 2) % 7] + (degree + 2 >= 7 ? 12 : 0) - (tonic + interval) + 12) % 12;
+    const fifth = (tonic + scale[(degree + 4) % 7] + (degree + 4 >= 7 ? 12 : 0) - (tonic + interval) + 12) % 12;
+    const quality = fifth === 6 ? "dim" : third === 3 ? "m" : "";
+    return {
+      root,
+      tones: new Set([root, (root + third) % 12, (root + fifth) % 12]),
+      label: `${harmonyPitchNames[root]}${quality}`,
+    };
+  });
+
+  const measureCount = Math.max(1, Math.ceil(Math.max(0, ...notes.map((note) => note.startBeat + note.beats)) / 4));
+  const emissions = Array.from({ length: measureCount }, (_, measure) => candidates.map((chord) => notes
+    .filter((note) => note.startBeat >= measure * 4 && note.startBeat < (measure + 1) * 4)
+    .reduce((score, note) => {
+      const pitchClass = ((note.midi % 12) + 12) % 12;
+      const weight = ((note.velocity ?? 64) / 127) * (note.midi < 60 ? 1.7 : 1);
+      if (pitchClass === chord.root) return score + weight * (note.midi < 60 ? 2.5 : 1.6);
+      return score + weight * (chord.tones.has(pitchClass) ? 1.2 : -0.45);
+    }, 0)));
+
+  const scores = emissions.map((row) => row.map(() => Number.NEGATIVE_INFINITY));
+  const previous = emissions.map((row) => row.map(() => 0));
+  emissions[0].forEach((score, chord) => { scores[0][chord] = score; });
+  for (let measure = 1; measure < measureCount; measure += 1) {
+    candidates.forEach((chord, chordIndex) => {
+      candidates.forEach((prior, priorIndex) => {
+        const interval = (chord.root - prior.root + 12) % 12;
+        const transition = chordIndex === priorIndex ? 0.45 : [5, 7].includes(interval) ? 0.25 : -0.2;
+        const score = scores[measure - 1][priorIndex] + emissions[measure][chordIndex] + transition;
+        if (score > scores[measure][chordIndex]) {
+          scores[measure][chordIndex] = score;
+          previous[measure][chordIndex] = priorIndex;
+        }
+      });
+    });
+  }
+  let cursor = scores[measureCount - 1].reduce((best, score, index, row) => score > row[best] ? index : best, 0);
+  const progression = Array.from({ length: measureCount }, () => candidates[0]);
+  for (let measure = measureCount - 1; measure >= 0; measure -= 1) {
+    progression[measure] = candidates[cursor];
+    cursor = previous[measure][cursor];
+  }
+  return progression;
+}
+
+function cleanPianoNotes(notes: Note[]) {
+  const unique = new Map<string, Note>();
+  notes
+    .filter((note) => (note.velocity ?? 127) >= 40)
+    .forEach((note) => {
+      const key = `${note.startBeat}:${note.midi}`;
+      const previous = unique.get(key);
+      if (!previous || (note.velocity ?? 0) > (previous.velocity ?? 0)) unique.set(key, note);
+    });
+
+  const onsetGroups = new Map<number, Note[]>();
+  unique.forEach((note) => onsetGroups.set(note.startBeat, [...(onsetGroups.get(note.startBeat) ?? []), note]));
+  const progression = inferChordProgression([...unique.values()]);
+  const cleaned = [...onsetGroups.entries()].flatMap(([startBeat, group]) => {
+    const chord = progression[Math.min(progression.length - 1, Math.floor(startBeat / 4))];
+    const treble = group.filter((note) => note.midi >= 60);
+    const bass = group.filter((note) => note.midi < 60);
+    const melody = [...treble].sort((a, b) => (
+      ((b.velocity ?? 0) + (b.midi - 60) * 1.1) - ((a.velocity ?? 0) + (a.midi - 60) * 1.1)
+    ))[0];
+    const trebleChordTones = treble
+      .filter((note) => chord.tones.has(((note.midi % 12) + 12) % 12))
+      .sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0));
+    const keptTreble = [melody, ...trebleChordTones]
+      .filter((note): note is Note => Boolean(note))
+      .filter((note, index, all) => all.indexOf(note) === index)
+      .slice(0, 4);
+    const bassChordTones = bass
+      .filter((note) => chord.tones.has(((note.midi % 12) + 12) % 12))
+      .sort((a, b) => {
+        const aRoot = ((a.midi % 12) + 12) % 12 === chord.root ? 35 : 0;
+        const bRoot = ((b.midi % 12) + 12) % 12 === chord.root ? 35 : 0;
+        return ((b.velocity ?? 0) + bRoot) - ((a.velocity ?? 0) + aRoot);
+      });
+    const keptBass = (bassChordTones.length ? bassChordTones : [...bass].sort((a, b) => (b.velocity ?? 0) - (a.velocity ?? 0))).slice(0, 2);
+    return [...keptTreble, ...keptBass];
+  }).sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
+
+  progression.forEach((chord, measure) => {
+    const firstTreble = cleaned.find((note) => note.midi >= 60 && note.startBeat >= measure * 4 && note.startBeat < (measure + 1) * 4);
+    if (firstTreble) firstTreble.chord = chord.label;
+  });
+  return cleaned;
+}
+
 const baseTracks: Track[] = [
   {
     id: 1,
     name: "Piano",
     abbreviation: "Pno.",
-    clef: "𝄞",
+    clef: TREBLE_CLEF,
     color: "#69406f",
-    notes: melody.map((midi, i) => ({ midi, beats: i % 7 === 6 ? 1 : 0.5 })),
+    notes: sequentialNotes(melody),
     volume: 78,
     muted: false,
     solo: false,
   },
-  {
-    id: 2,
-    name: "Violin",
-    abbreviation: "Vln.",
-    clef: "𝄞",
-    color: "#d76047",
-    notes: melody.map((midi, i) => ({ midi: midi + (i % 8 < 4 ? 12 : 7), beats: 0.5 })),
-    volume: 66,
-    muted: false,
-    solo: false,
-  },
-  {
-    id: 3,
-    name: "Cello",
-    abbreviation: "Vc.",
-    clef: "𝄢",
-    color: "#70866f",
-    notes: melody.map((midi, i) => ({ midi: midi - 12 - (i % 4 === 0 ? 5 : 0), beats: 1 })),
-    volume: 62,
-    muted: false,
-    solo: false,
-  },
 ];
-
-const instrumentPresets = [
-  ["Flute", "Fl.", "𝄞", "#3c8291", 12],
-  ["Clarinet", "Cl.", "𝄞", "#ad7b34", 5],
-  ["Guitar", "Gtr.", "𝄞", "#8c604e", -5],
-  ["Double bass", "Cb.", "𝄢", "#465f78", -24],
-] as const;
 
 const noteNames = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 
@@ -80,124 +190,295 @@ function noteLabel(midi: number) {
   return `${noteNames[midi % 12]}${Math.floor(midi / 12) - 1}`;
 }
 
-function midiFrequency(midi: number) {
-  return 440 * 2 ** ((midi - 69) / 12);
-}
+const pianoSampleMidis = [...Array.from({ length: 26 }, (_, index) => 24 + index * 3), 100];
+let pianoSamplesPromise: Promise<Map<number, AudioBuffer>> | null = null;
 
-function detectedPitch(buffer: AudioBuffer, offset: number, frameSize = 2048) {
-  const source = buffer.getChannelData(0);
-  const end = Math.min(offset + frameSize, source.length);
-  if (end - offset < 512) return null;
-
-  let rms = 0;
-  for (let i = offset; i < end; i++) rms += source[i] * source[i];
-  rms = Math.sqrt(rms / (end - offset));
-  if (rms < 0.025) return null;
-
-  const minLag = Math.floor(buffer.sampleRate / 1000);
-  const maxLag = Math.min(Math.floor(buffer.sampleRate / 75), frameSize - 2);
-  let bestLag = -1;
-  let best = 0;
-  for (let lag = minLag; lag <= maxLag; lag += 2) {
-    let correlation = 0;
-    for (let i = 0; i < frameSize - lag; i += 2) {
-      correlation += source[offset + i] * source[offset + i + lag];
-    }
-    if (correlation > best) {
-      best = correlation;
-      bestLag = lag;
-    }
+function loadPianoSamples(context: AudioContext) {
+  if (!pianoSamplesPromise) {
+    pianoSamplesPromise = Promise.all(pianoSampleMidis.map(async (midi) => {
+      const response = await fetch(`/piano-samples/${midi}.mp3`);
+      if (!response.ok) throw new Error(`Piano sample ${midi} could not be loaded`);
+      return [midi, await context.decodeAudioData(await response.arrayBuffer())] as const;
+    })).then((entries) => new Map(entries));
   }
-  if (bestLag < 0) return null;
-  const frequency = buffer.sampleRate / bestLag;
-  const midi = Math.round(69 + 12 * Math.log2(frequency / 440));
-  return midi >= 35 && midi <= 96 ? midi : null;
+  return pianoSamplesPromise;
 }
 
-async function transcribeFile(file: File): Promise<Note[]> {
-  const context = new AudioContext();
+function formatClock(seconds: number) {
+  const whole = Math.max(0, Math.round(seconds));
+  return `${Math.floor(whole / 60).toString().padStart(2, "0")}:${(whole % 60).toString().padStart(2, "0")}`;
+}
+
+function isValidYouTubeUrl(value: string) {
   try {
-    const decoded = await context.decodeAudioData(await file.arrayBuffer());
-    const hop = Math.max(1024, Math.floor(decoded.sampleRate * 0.115));
-    const raw: number[] = [];
-    const limit = Math.min(decoded.length, decoded.sampleRate * 150);
-    for (let offset = 0; offset < limit; offset += hop) {
-      const midi = detectedPitch(decoded, offset);
-      if (midi !== null) raw.push(midi);
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
+    const host = url.hostname.toLowerCase();
+    let id = "";
+    if (host === "youtu.be") id = url.pathname.split("/").filter(Boolean)[0] ?? "";
+    else if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(host)) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      id = url.pathname === "/watch" ? url.searchParams.get("v") ?? "" : ["shorts", "embed", "live"].includes(parts[0] ?? "") ? parts[1] ?? "" : "";
     }
-    if (!raw.length) return [];
-    const compressed: Note[] = [];
-    for (const midi of raw) {
-      const previous = compressed.at(-1);
-      if (previous && Math.abs(previous.midi - midi) <= 1) {
-        previous.beats = Math.min(2, previous.beats + 0.25);
-      } else {
-        compressed.push({ midi, beats: 0.5 });
-      }
-      if (compressed.length >= 48) break;
-    }
-    return compressed;
-  } finally {
-    await context.close();
+    return /^[A-Za-z0-9_-]{11}$/.test(id);
+  } catch {
+    return false;
   }
-}
-
-function staffTop(midi: number, clef: string) {
-  const pitchClass = ((midi % 12) + 12) % 12;
-  const diatonicOffsets = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
-  const octave = Math.floor(midi / 12) - 1;
-  const diatonicPitch = octave * 7 + diatonicOffsets[pitchClass];
-  const bottomLine = clef === BASS_CLEF ? 3 * 7 + 4 : 4 * 7 + 2;
-  return 60 - (diatonicPitch - bottomLine) * 5;
-}
-
-function StaffNote({ note, index, clef, selected, onSelect }: { note: Note; index: number; clef: string; selected: boolean; onSelect: () => void }) {
-  const top = staffTop(note.midi, clef);
-  const hasLedger = top < 16 || top > 64;
-  return (
-    <button
-      className={`score-note ${selected ? "selected" : ""}`}
-      style={{ "--note-top": `${top}px` } as CSSProperties}
-      onClick={onSelect}
-      title={`${noteLabel(note.midi)} · ${note.beats} beat${note.beats === 1 ? "" : "s"}`}
-      aria-label={`Select ${noteLabel(note.midi)}`}
-    >
-      {hasLedger && <span className="ledger-line" />}
-      <span className="note-head" />
-      {note.beats <= 1 && <span className={`note-stem ${index % 5 === 4 ? "down" : ""}`} />}
-      {note.beats <= 0.5 && <span className="note-flag">›</span>}
-    </button>
-  );
 }
 
 function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedNote: string; onSelect: (id: string) => void }) {
-  const visibleNotes = track.notes.slice(0, 32);
-  const clef = track.name === "Cello" || track.name === "Double bass" ? BASS_CLEF : TREBLE_CLEF;
+  const container = useRef<HTMLDivElement>(null);
+  const bassClef = track.name === "Cello" || track.name === "Double bass";
+
+  useEffect(() => {
+    const target = container.current;
+    if (!target) return;
+    let cancelled = false;
+
+    async function drawStaff() {
+      const { Accidental, Formatter, Renderer, Stave, StaveNote } = await import("vexflow");
+      if (cancelled || !target) return;
+      target.replaceChildren();
+
+      const indexedNotes: Array<Note & { index: number }> = [];
+      let totalBeats = 0;
+      for (const [index, note] of track.notes.entries()) {
+        if (totalBeats + note.beats > 16) break;
+        indexedNotes.push({ ...note, index });
+        totalBeats += note.beats;
+      }
+
+      const measures: Array<Array<Note & { index: number }>> = [[], [], [], []];
+      let measureIndex = 0;
+      let beatsInMeasure = 0;
+      for (const note of indexedNotes) {
+        if (beatsInMeasure + note.beats > 4 && measureIndex < 3) {
+          measureIndex += 1;
+          beatsInMeasure = 0;
+        }
+        measures[measureIndex].push(note);
+        beatsInMeasure += note.beats;
+        if (beatsInMeasure >= 4 && measureIndex < 3) {
+          measureIndex += 1;
+          beatsInMeasure = 0;
+        }
+      }
+
+      const width = Math.max(590, target.clientWidth || 650);
+      const renderer = new Renderer(target, Renderer.Backends.SVG);
+      renderer.resize(width, 104);
+      const context = renderer.getContext();
+      const firstMeasureWidth = Math.min(190, width * 0.29);
+      const laterMeasureWidth = (width - firstMeasureWidth + 3) / 3;
+      const keyNames = ["c", "c#", "d", "eb", "e", "f", "f#", "g", "ab", "a", "bb", "b"];
+      const accidentals = ["", "#", "", "b", "", "n", "", "", "b", "", "b", ""];
+      const renderedIndexes: number[] = [];
+      let x = 0;
+
+      measures.forEach((measure, index) => {
+        const measureWidth = index === 0 ? firstMeasureWidth : laterMeasureWidth;
+        const stave = new Stave(x, 12, measureWidth);
+        if (index === 0) stave.addClef(bassClef ? "bass" : "treble").addKeySignature("G").addTimeSignature("4/4");
+        stave.setContext(context).draw();
+
+        const notes = measure.map((note) => {
+          const pitchClass = ((note.midi % 12) + 12) % 12;
+          const duration = note.beats < 0.375 ? "16" : note.beats < 0.75 ? "8" : note.beats < 1.5 ? "q" : "h";
+          const staveNote = new StaveNote({
+            clef: bassClef ? "bass" : "treble",
+            keys: [`${keyNames[pitchClass]}/${Math.floor(note.midi / 12) - 1}`],
+            duration,
+            autoStem: true,
+          });
+          if (accidentals[pitchClass]) staveNote.addModifier(new Accidental(accidentals[pitchClass]), 0);
+          renderedIndexes.push(note.index);
+          return staveNote;
+        });
+        if (notes.length) Formatter.FormatAndDraw(context, stave, notes, { autoBeam: true });
+        x += measureWidth - 1;
+      });
+
+      target.querySelectorAll<SVGGElement>(".vf-stavenote").forEach((element, renderedIndex) => {
+        const originalIndex = renderedIndexes[renderedIndex];
+        element.classList.toggle("selected", selectedNote === `${track.id}-${originalIndex}`);
+        element.setAttribute("role", "button");
+        element.setAttribute("aria-label", `Select ${noteLabel(track.notes[originalIndex].midi)}`);
+        element.addEventListener("click", () => onSelect(`${track.id}-${originalIndex}`));
+      });
+    }
+
+    void drawStaff();
+    return () => { cancelled = true; };
+  }, [bassClef, onSelect, selectedNote, track.id, track.notes]);
+
   return (
     <div className="staff-row" style={{ "--track": track.color } as CSSProperties}>
       <div className="staff-label">
         <span className="track-swatch" />
         <strong>{track.name}</strong>
       </div>
-      <div className="staff-music">
-        <span className="staff-lines" aria-hidden="true" />
-        <span className="clef">{clef}</span>
-        <span className="key-signature">♯</span>
-        <span className="time-signature"><b>4</b><b>4</b></span>
-        <div className="notes-grid">
-          {visibleNotes.map((note, index) => (
-            <StaffNote
-              key={`${track.id}-${index}`}
-              note={note}
-              index={index}
-              clef={clef}
-              selected={selectedNote === `${track.id}-${index}`}
-              onSelect={() => onSelect(`${track.id}-${index}`)}
-            />
-          ))}
-          {[1, 2, 3].map((bar) => <span className="bar-line" style={{ left: `${bar * 25}%` }} key={bar} />)}
-        </div>
-      </div>
+      <div className="engraved-staff" ref={container} />
+    </div>
+  );
+}
+
+function PianoSystem({
+  track,
+  systemStart,
+  showLabel,
+  selectedNote,
+  onSelect,
+}: {
+  track: Track;
+  systemStart: number;
+  showLabel: boolean;
+  selectedNote: string;
+  onSelect: (id: string) => void;
+}) {
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const target = container.current;
+    if (!target) return;
+    let cancelled = false;
+
+    async function drawStaff() {
+      const { Accidental, Annotation, Dot, Formatter, Renderer, Stave, StaveConnector, StaveNote } = await import("vexflow");
+      if (cancelled || !target) return;
+      target.replaceChildren();
+
+      const width = Math.max(590, target.clientWidth || 650);
+      const renderer = new Renderer(target, Renderer.Backends.SVG);
+      renderer.resize(width, 205);
+      const context = renderer.getContext();
+      const firstMeasureWidth = Math.min(330, width * 0.54);
+      const laterMeasureWidth = width - firstMeasureWidth + 1;
+      const keyNames = ["c", "c#", "d", "eb", "e", "f", "f#", "g", "ab", "a", "bb", "b"];
+      const accidentalNames = ["", "#", "", "b", "", "", "#", "", "b", "", "b", ""];
+      const indexed = track.notes
+        .map((note, index) => ({ ...note, index }))
+        .filter((note) => note.startBeat >= systemStart && note.startBeat < systemStart + 8);
+
+      const durationFor = (beats: number) => beats >= 4 ? [4, "w", false] as const
+        : beats >= 3 ? [3, "h", true] as const
+        : beats >= 2 ? [2, "h", false] as const
+        : beats >= 1.5 ? [1.5, "q", true] as const
+        : beats >= 1 ? [1, "q", false] as const
+        : beats >= 0.75 ? [0.75, "8", true] as const
+        : beats >= 0.5 ? [0.5, "8", false] as const
+        : [0.25, "16", false] as const;
+
+      const bindRenderedNotes = (before: number, indexes: Array<number | null>) => {
+        [...target.querySelectorAll<SVGGElement>(".vf-stavenote")].slice(before).forEach((element, renderedIndex) => {
+          const originalIndex = indexes[renderedIndex];
+          if (originalIndex === null || originalIndex === undefined) return;
+          element.classList.toggle("selected", selectedNote === `${track.id}-${originalIndex}`);
+          element.setAttribute("role", "button");
+          element.setAttribute("aria-label", `Select ${noteLabel(track.notes[originalIndex].midi)}`);
+          element.addEventListener("click", () => onSelect(`${track.id}-${originalIndex}`));
+        });
+      };
+
+      const renderVoice = (
+        stave: InstanceType<typeof Stave>,
+        clef: "treble" | "bass",
+        measureStart: number,
+        measureEnd: number,
+      ) => {
+        const groups = new Map<number, Array<Note & { index: number }>>();
+        indexed
+          .filter((note) => clef === "treble" ? note.midi >= 60 : note.midi < 60)
+          .filter((note) => note.startBeat >= measureStart && note.startBeat < measureEnd)
+          .forEach((note) => {
+            const onset = Math.round(note.startBeat * 4) / 4;
+            if (onset >= measureEnd) return;
+            groups.set(onset, [...(groups.get(onset) ?? []), note]);
+          });
+        const starts = [...groups.keys()].sort((a, b) => a - b);
+        const tickables: InstanceType<typeof StaveNote>[] = [];
+        const indexes: Array<number | null> = [];
+        let cursor = measureStart;
+
+        const addDuration = (beats: number, rest: boolean, group: Array<Note & { index: number }> = []) => {
+          let remaining = Math.round(beats * 4) / 4;
+          while (remaining >= 0.25) {
+            const [used, duration, dotted] = durationFor(remaining);
+            const sorted = [...group].sort((a, b) => a.midi - b.midi);
+            const staveNote = new StaveNote({
+              clef,
+              keys: rest
+                ? [clef === "treble" ? "b/4" : "d/3"]
+                : sorted.map((note) => `${keyNames[((note.midi % 12) + 12) % 12]}/${Math.floor(note.midi / 12) - 1}`),
+              duration: `${duration}${rest ? "r" : ""}`,
+              autoStem: !rest,
+            });
+            if (dotted) Dot.buildAndAttach([staveNote], { all: true });
+            if (!rest) {
+              sorted.forEach((note, keyIndex) => {
+                const accidental = accidentalNames[((note.midi % 12) + 12) % 12];
+                if (accidental) staveNote.addModifier(new Accidental(accidental), keyIndex);
+              });
+              const chord = clef === "treble" ? sorted.find((note) => note.chord)?.chord : undefined;
+              if (chord) staveNote.addModifier(new Annotation(chord).setVerticalJustification("top").setJustification("left"), 0);
+            }
+            tickables.push(staveNote);
+            indexes.push(rest ? null : sorted[0]?.index ?? null);
+            remaining -= used;
+            if (!rest) break;
+          }
+        };
+
+        starts.forEach((onset, groupIndex) => {
+          if (onset > cursor) addDuration(onset - cursor, true);
+          const nextOnset = starts[groupIndex + 1] ?? measureEnd;
+          const span = Math.max(0.25, nextOnset - onset);
+          addDuration(Math.min(span, measureEnd - onset), false, groups.get(onset) ?? []);
+          cursor = onset + durationFor(Math.min(span, measureEnd - onset))[0];
+        });
+        if (cursor < measureEnd) addDuration(measureEnd - cursor, true);
+        if (!tickables.length) addDuration(4, true);
+        const before = target.querySelectorAll(".vf-stavenote").length;
+        Formatter.FormatAndDraw(context, stave, tickables, { autoBeam: true, alignRests: true });
+        bindRenderedNotes(before, indexes);
+      };
+
+      let x = 0;
+      for (let measureIndex = 0; measureIndex < 2; measureIndex += 1) {
+        const measureWidth = measureIndex === 0 ? firstMeasureWidth : laterMeasureWidth;
+        const trebleStave = new Stave(x, 16, measureWidth);
+        const bassStave = new Stave(x, 106, measureWidth);
+        if (measureIndex === 0) {
+          trebleStave.addClef("treble").addKeySignature("C");
+          bassStave.addClef("bass").addKeySignature("C");
+          if (systemStart === 0) {
+            trebleStave.addTimeSignature("4/4");
+            bassStave.addTimeSignature("4/4");
+          }
+        }
+        trebleStave.setContext(context).draw();
+        bassStave.setContext(context).draw();
+        if (measureIndex === 0) {
+          new StaveConnector(trebleStave, bassStave).setType("brace").setContext(context).draw();
+          new StaveConnector(trebleStave, bassStave).setType("singleLeft").setContext(context).draw();
+        }
+        if (measureIndex === 1) new StaveConnector(trebleStave, bassStave).setType("singleRight").setContext(context).draw();
+
+        const measureStart = systemStart + measureIndex * 4;
+        const measureEnd = measureStart + 4;
+        renderVoice(trebleStave, "treble", measureStart, measureEnd);
+        renderVoice(bassStave, "bass", measureStart, measureEnd);
+        x += measureWidth - 1;
+      }
+    }
+
+    void drawStaff();
+    return () => { cancelled = true; };
+  }, [onSelect, selectedNote, systemStart, track]);
+
+  return (
+    <div className="staff-row piano-grand-system" style={{ "--track": track.color } as CSSProperties}>
+      <div className="staff-label">{showLabel && <><span className="track-swatch" /><strong>Piano</strong></>}</div>
+      <div className="engraved-grand-staff" ref={container} />
     </div>
   );
 }
@@ -218,15 +499,17 @@ export function ScoreCraft() {
   const [selectedNote, setSelectedNote] = useState("1-3");
   const [analysis, setAnalysis] = useState<null | { progress: number; label: string }>(null);
   const [message, setMessage] = useState("Your changes are saved on this device");
-  const [addMenu, setAddMenu] = useState(false);
+  const [sourceDuration, setSourceDuration] = useState<number | null>(null);
   const [exportMenu, setExportMenu] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const duration = 48;
+  const totalBeats = useMemo(() => Math.max(16, ...tracks.flatMap((track) => track.notes.map((note) => note.startBeat + note.beats))), [tracks]);
+  const systemStarts = useMemo(() => Array.from({ length: Math.min(40, Math.ceil(totalBeats / 8)) }, (_, index) => index * 8), [totalBeats]);
+  const duration = Math.max(1, Math.ceil(sourceDuration ?? totalBeats * 60 / tempo));
 
-  const validYoutubeUrl = /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)[\w-]{6,}/i.test(youtubeUrl.trim());
-  const sourceReady = Boolean(file);
+  const validYoutubeUrl = isValidYouTubeUrl(youtubeUrl.trim());
+  const sourceReady = sourceMode === "youtube" ? validYoutubeUrl : Boolean(file);
   const selected = useMemo(() => {
     const [trackId, index] = selectedNote.split("-").map(Number);
     return tracks.find((track) => track.id === trackId)?.notes[index];
@@ -234,7 +517,9 @@ export function ScoreCraft() {
 
   useEffect(() => () => {
     if (timer.current) clearInterval(timer.current);
-    void audioContext.current?.close();
+    const context = audioContext.current;
+    audioContext.current = null;
+    if (context && context.state !== "closed") void context.close().catch(() => undefined);
   }, []);
 
   function chooseFile(next: File | undefined) {
@@ -253,45 +538,83 @@ export function ScoreCraft() {
     chooseFile(event.dataTransfer.files[0]);
   }
 
+  function rememberPlaybackSource(sourceFile: File) {
+    const url = URL.createObjectURL(sourceFile);
+    const probe = new Audio(url);
+    probe.preload = "metadata";
+    probe.addEventListener("loadedmetadata", () => {
+      if (Number.isFinite(probe.duration)) setSourceDuration(probe.duration);
+      URL.revokeObjectURL(url);
+    }, { once: true });
+    probe.addEventListener("error", () => {
+      URL.revokeObjectURL(url);
+    }, { once: true });
+  }
+
   async function analyzeSource() {
     if (!sourceReady) {
       setMessage(sourceMode === "youtube"
-        ? "YouTube blocks direct audio access. Add the audio or video file from that recording first."
+        ? "Enter a complete public YouTube video link first."
         : "Add an audio or video file first");
       return;
     }
-    setAnalysis({ progress: 8, label: "Separating melody from accompaniment" });
-    const intervals = [
-      [24, "Finding tempo and downbeats"],
-      [46, "Detecting pitch and rhythm"],
-      [69, "Voicing instrument parts"],
-      [88, "Engraving the score"],
-    ] as const;
-    for (const [progress, label] of intervals) {
-      await new Promise((resolve) => setTimeout(resolve, 420));
-      setAnalysis({ progress, label });
+    let sourceFile = file;
+    if (sourceMode === "youtube") {
+      setAnalysis({ progress: 5, label: "Downloading audio from YouTube" });
+      try {
+        const response = await fetch("/__local/youtube-audio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: youtubeUrl.trim() }),
+        });
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({ error: "YouTube audio could not be loaded." })) as { error?: string };
+          throw new Error(result.error || "YouTube audio could not be loaded.");
+        }
+        const videoTitle = response.headers.get("X-ScoreCraft-Title");
+        if (videoTitle) setTitle(decodeURIComponent(videoTitle));
+        const videoDuration = Number(response.headers.get("X-ScoreCraft-Duration"));
+        if (Number.isFinite(videoDuration) && videoDuration > 0) setSourceDuration(videoDuration);
+        const audio = await response.blob();
+        if (!audio.size) throw new Error("YouTube returned an empty audio track.");
+        sourceFile = new File([audio], "youtube-audio.m4a", { type: audio.type || "audio/mp4" });
+      } catch (error) {
+        setAnalysis(null);
+        setMessage(error instanceof Error ? error.message : "YouTube audio could not be loaded.");
+        return;
+      }
     }
 
     let notes: Note[] = [];
-    if (file) {
+    if (sourceFile) {
       try {
-        notes = await transcribeFile(file);
-      } catch {
-        setMessage("The browser could not decode this recording, so a clean demo arrangement was created instead");
+        rememberPlaybackSource(sourceFile);
+        const { transcribePiano } = await import("./piano-transcription");
+        const transcription = await transcribePiano(sourceFile, (progress, label) => setAnalysis({ progress, label }));
+        const detectedTempo = transcription.tempo;
+        setTempo(detectedTempo);
+        const events = transcription.notes;
+        notes = cleanPianoNotes(events.map((note) => ({
+          midi: note.midi,
+          startBeat: Math.max(0, Math.round((note.startSeconds * detectedTempo / 60) * 4) / 4),
+          beats: Math.max(0.25, Math.min(4, Math.round((note.durationSeconds * detectedTempo / 60) * 4) / 4)),
+          velocity: note.velocity,
+          startSeconds: note.startSeconds,
+          durationSeconds: note.durationSeconds,
+        })));
+      } catch (error) {
+        setAnalysis(null);
+        setMessage(error instanceof Error ? `Piano transcription failed: ${error.message}` : "The browser could not transcribe this audio.");
+        return;
       }
     }
-    if (notes.length >= 4) {
-      setTracks((current) => current.map((track, index) => ({
-        ...track,
-        notes: notes.map((note, noteIndex) => ({
-          ...note,
-          midi: Math.max(34, Math.min(98, note.midi + (index === 1 ? 12 : index === 2 ? -12 - (noteIndex % 4 === 0 ? 5 : 0) : 0))),
-        })),
-      })));
+    if (notes.length) {
+      setTracks([{ ...baseTracks[0], notes }]);
+      setSelectedNote("1-0");
     }
-    setAnalysis({ progress: 100, label: "Score ready" });
+    setAnalysis({ progress: 100, label: "Piano score ready" });
     setTimeout(() => setAnalysis(null), 650);
-    setMessage(notes.length >= 4 ? `Transcribed ${file?.name}` : "No clear melody was detected. Try a recording with less accompaniment.");
+    setMessage(notes.length ? `Transcribed ${notes.length} piano notes with tempo and harmony cleanup.` : "No clear piano notes were detected. Use a piano-only recording with little background noise.");
   }
 
   function stopPlayback(reset = false) {
@@ -299,8 +622,98 @@ export function ScoreCraft() {
     timer.current = null;
     setPlaying(false);
     if (reset) setPlayhead(0);
-    void audioContext.current?.close();
+    const context = audioContext.current;
     audioContext.current = null;
+    if (context && context.state !== "closed") void context.close().catch(() => undefined);
+  }
+
+  async function startSynthPlayback(startAt: number) {
+    const context = new AudioContext();
+    audioContext.current = context;
+    void context.resume();
+    setMessage("Loading the local sampled grand piano");
+    let samples: Map<number, AudioBuffer>;
+    try {
+      samples = await loadPianoSamples(context);
+    } catch (error) {
+      stopPlayback();
+      setMessage(error instanceof Error ? error.message : "The sampled piano could not be loaded");
+      return;
+    }
+    const beatSeconds = 60 / tempo;
+    const soloed = tracks.some((track) => track.solo);
+    const events = tracks
+      .filter((track) => !track.muted && (!soloed || track.solo))
+      .flatMap((track) => track.notes.map((note) => ({ note, volume: track.volume })))
+      .sort((a, b) => a.note.startBeat - b.note.startBeat || a.note.midi - b.note.midi);
+    if (!events.length) {
+      setMessage("There are no audible piano notes. Unmute Piano or transcribe a recording first.");
+      stopPlayback();
+      return;
+    }
+    setMessage("Playing the transcribed notes with a sampled grand piano");
+    let eventIndex = Math.max(0, events.findIndex(({ note }) => (
+      (note.startSeconds ?? note.startBeat * beatSeconds)
+      + (note.durationSeconds ?? note.beats * beatSeconds)
+    ) >= startAt));
+    if (eventIndex < 0) eventIndex = events.length;
+    const wallStartedAt = performance.now();
+
+    const compressor = context.createDynamicsCompressor();
+    compressor.threshold.value = -18;
+    compressor.knee.value = 12;
+    compressor.ratio.value = 3;
+    compressor.attack.value = 0.004;
+    compressor.release.value = 0.28;
+    const master = context.createGain();
+    master.gain.value = 0.92;
+    master.connect(compressor).connect(context.destination);
+
+    const scheduleNote = (note: Note, volume: number, sourcePosition: number) => {
+      const noteStart = note.startSeconds ?? note.startBeat * beatSeconds;
+      const noteDuration = Math.max(0.14, note.durationSeconds ?? note.beats * beatSeconds);
+      const elapsedIntoNote = Math.max(0, sourcePosition - noteStart);
+      if (elapsedIntoNote >= noteDuration) return;
+      const when = context.currentTime + Math.max(0.01, noteStart - sourcePosition);
+      const audibleDuration = Math.max(0.08, noteDuration - elapsedIntoNote);
+      const anchor = pianoSampleMidis.reduce((nearest, midi) => (
+        Math.abs(midi - note.midi) < Math.abs(nearest - note.midi) ? midi : nearest
+      ), pianoSampleMidis[0]);
+      const sample = samples.get(anchor);
+      if (!sample) return;
+      const source = context.createBufferSource();
+      const gain = context.createGain();
+      source.buffer = sample;
+      source.playbackRate.value = 2 ** ((note.midi - anchor) / 12);
+      const velocity = Math.max(0.18, Math.min(1, (note.velocity ?? 72) / 108));
+      const level = velocity * Math.max(0.1, volume / 100) * 0.72;
+      const releaseAt = when + audibleDuration;
+      gain.gain.setValueAtTime(level, when);
+      gain.gain.setValueAtTime(level * 0.82, Math.max(when, releaseAt - 0.08));
+      gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + 0.22);
+      source.connect(gain).connect(master);
+      source.start(when, Math.min(elapsedIntoNote, Math.max(0, sample.duration - 0.05)));
+      source.stop(releaseAt + 0.24);
+    };
+
+    setPlaying(true);
+    timer.current = setInterval(() => {
+      const sourcePosition = startAt + (performance.now() - wallStartedAt) / 1000;
+      while (eventIndex < events.length) {
+        const event = events[eventIndex];
+        const noteStart = event.note.startSeconds ?? event.note.startBeat * beatSeconds;
+        if (noteStart > sourcePosition + 0.35) break;
+        scheduleNote(event.note, event.volume, sourcePosition);
+        eventIndex += 1;
+      }
+      const next = (sourcePosition / duration) * 100;
+      if (next >= 100) {
+        if (looping) {
+          stopPlayback(true);
+          setTimeout(() => void startPlayback(), 80);
+        } else stopPlayback(true);
+      } else setPlayhead(next);
+    }, 60);
   }
 
   function startPlayback() {
@@ -308,44 +721,8 @@ export function ScoreCraft() {
       stopPlayback();
       return;
     }
-    const context = new AudioContext();
-    audioContext.current = context;
-    const beatSeconds = 60 / tempo;
-    const soloed = tracks.some((track) => track.solo);
     const startAt = (playhead / 100) * duration;
-    tracks.forEach((track, trackIndex) => {
-      if (track.muted || (soloed && !track.solo)) return;
-      let beat = 0;
-      track.notes.slice(0, 32).forEach((note) => {
-        const when = beat * beatSeconds;
-        if (when >= startAt) {
-          const oscillator = context.createOscillator();
-          const gain = context.createGain();
-          oscillator.type = trackIndex === 0 ? "triangle" : trackIndex === 1 ? "sine" : "sawtooth";
-          oscillator.frequency.value = midiFrequency(note.midi);
-          gain.gain.setValueAtTime(0.0001, context.currentTime + when - startAt);
-          gain.gain.exponentialRampToValueAtTime(Math.max(0.01, track.volume / 1000), context.currentTime + when - startAt + 0.02);
-          gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + when - startAt + Math.max(0.12, note.beats * beatSeconds * 0.86));
-          oscillator.connect(gain).connect(context.destination);
-          oscillator.start(context.currentTime + when - startAt);
-          oscillator.stop(context.currentTime + when - startAt + Math.max(0.15, note.beats * beatSeconds));
-        }
-        beat += note.beats;
-      });
-    });
-
-    const started = performance.now() - startAt * 1000;
-    setPlaying(true);
-    timer.current = setInterval(() => {
-      const elapsed = (performance.now() - started) / 1000;
-      const next = (elapsed / duration) * 100;
-      if (next >= 100) {
-        if (looping) {
-          stopPlayback(true);
-          setTimeout(startPlayback, 80);
-        } else stopPlayback(true);
-      } else setPlayhead(next);
-    }, 80);
+    void startSynthPlayback(startAt);
   }
 
   function updateTrack(id: number, patch: Partial<Track>) {
@@ -360,24 +737,6 @@ export function ScoreCraft() {
       notes: track.notes.map((note, index) => index === noteIndex ? { ...note, midi: note.midi + amount } : note),
     }));
     setMessage(`Note moved ${amount > 0 ? "up" : "down"} one semitone`);
-  }
-
-  function addInstrument(preset: typeof instrumentPresets[number]) {
-    const [name, abbreviation, clef, color, transpose] = preset;
-    const id = Math.max(0, ...tracks.map((track) => track.id)) + 1;
-    setTracks((current) => [...current, {
-      id, name, abbreviation, clef, color, volume: 60, muted: false, solo: false,
-      notes: melody.map((midi) => ({ midi: midi + transpose, beats: 0.5 })),
-    }]);
-    setAddMenu(false);
-    setMessage(`${name} part added`);
-  }
-
-  function removeInstrument(id: number) {
-    const removed = tracks.find((track) => track.id === id);
-    setTracks((current) => current.filter((track) => track.id !== id));
-    if (selectedNote.startsWith(`${id}-`)) setSelectedNote("");
-    setMessage(`${removed?.name ?? "Instrument"} removed`);
   }
 
   function xmlEscape(value: string) {
@@ -429,6 +788,72 @@ export function ScoreCraft() {
     setMessage("MusicXML exported");
   }
 
+  function exportPianoMusicXml() {
+    const divisions = 4;
+    const piano = tracks[0];
+    const measureCount = Math.max(1, Math.ceil(totalBeats / 4));
+    const typeFor = (ticks: number) => ticks >= 16 ? "whole" : ticks >= 8 ? "half" : ticks >= 4 ? "quarter" : ticks >= 2 ? "eighth" : "16th";
+    const writeStaff = (measureStart: number, staff: 1 | 2) => {
+      const measureEnd = measureStart + 4;
+      const notes = piano.notes
+        .filter((note) => note.startBeat >= measureStart && note.startBeat < measureEnd)
+        .filter((note) => staff === 1 ? note.midi >= 60 : note.midi < 60);
+      const groups = new Map<number, Note[]>();
+      notes.forEach((note) => {
+        const onset = Math.round(note.startBeat * divisions) / divisions;
+        groups.set(onset, [...(groups.get(onset) ?? []), note]);
+      });
+      const starts = [...groups.keys()].sort((a, b) => a - b);
+      const xml: string[] = [];
+      let cursorTicks = 0;
+      starts.forEach((start, groupIndex) => {
+        const onsetTicks = Math.round((start - measureStart) * divisions);
+        if (onsetTicks > cursorTicks) {
+          const restTicks = onsetTicks - cursorTicks;
+          xml.push(`<note><rest/><duration>${restTicks}</duration><voice>${staff}</voice><type>${typeFor(restTicks)}</type><staff>${staff}</staff></note>`);
+        }
+        const group = groups.get(start) ?? [];
+        const nextStart = starts[groupIndex + 1] ?? measureEnd;
+        const durationTicks = Math.max(1, Math.min(
+          Math.round(Math.min(...group.map((note) => note.beats)) * divisions),
+          Math.round((nextStart - start) * divisions),
+          16 - onsetTicks,
+        ));
+        group.sort((a, b) => a.midi - b.midi).forEach((note, noteIndex) => {
+          xml.push(`<note>${noteIndex ? "<chord/>" : ""}${musicXmlPitch(note.midi)}<duration>${durationTicks}</duration><voice>${staff}</voice><type>${typeFor(durationTicks)}</type><velocity>${note.velocity ?? 80}</velocity><staff>${staff}</staff></note>`);
+        });
+        cursorTicks = onsetTicks + durationTicks;
+      });
+      if (cursorTicks < 16) {
+        const restTicks = 16 - cursorTicks;
+        xml.push(`<note><rest/><duration>${restTicks}</duration><voice>${staff}</voice><type>${typeFor(restTicks)}</type><staff>${staff}</staff></note>`);
+      }
+      return xml.join("");
+    };
+
+    const measures = Array.from({ length: measureCount }, (_, index) => {
+      const attributes = index === 0
+        ? `<attributes><divisions>${divisions}</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>`
+        : "";
+      const measureStart = index * 4;
+      return `<measure number="${index + 1}">${attributes}${writeStaff(measureStart, 1)}<backup><duration>16</duration></backup>${writeStaff(measureStart, 2)}</measure>`;
+    }).join("");
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n<score-partwise version="4.0"><work><work-title>${xmlEscape(title)}</work-title></work><identification><creator type="composer">${xmlEscape(composer)}</creator><encoding><software>ScoreCraft</software></encoding></identification><part-list><score-part id="P1"><part-name>Piano</part-name><part-abbreviation>Pno.</part-abbreviation></score-part></part-list><part id="P1">${measures}</part></score-partwise>`;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([xml], { type: "application/vnd.recordare.musicxml+xml" }));
+    link.download = `${title.replace(/\s+/g, "-").toLowerCase() || "piano-score"}.musicxml`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    setExportMenu(false);
+    setMessage("Two-staff piano MusicXML exported");
+  }
+
+  function exportPdf() {
+    setExportMenu(false);
+    setMessage("Opening the print dialog. Choose Save as PDF.");
+    window.print();
+  }
+
   const currentTime = Math.round((playhead / 100) * duration);
 
   return (
@@ -448,8 +873,8 @@ export function ScoreCraft() {
             <button className="button primary" onClick={() => setExportMenu(!exportMenu)}><span>⇩</span> Export</button>
             {exportMenu && (
               <div className="floating-menu export-menu">
-                <button onClick={() => { setExportMenu(false); window.print(); }}><b>PDF</b><span>Print-ready score</span></button>
-                <button onClick={exportMusicXml}><b>MusicXML</b><span>Open in MuseScore</span></button>
+                <button onClick={exportPdf}><b>PDF</b><span>Save a print-ready score</span></button>
+                <button onClick={exportPianoMusicXml}><b>MusicXML</b><span>Two-staff piano score</span></button>
               </div>
             )}
           </div>
@@ -478,21 +903,19 @@ export function ScoreCraft() {
             <div className="youtube-box">
               <label htmlFor="youtube">YouTube link</label>
               <div className="url-input"><span>▶</span><input id="youtube" placeholder="https://youtu.be/…" value={youtubeUrl} onChange={(event) => setYoutubeUrl(event.target.value)} /></div>
-              <p className={youtubeUrl && !validYoutubeUrl ? "input-error" : ""}>{youtubeUrl && !validYoutubeUrl ? "Enter a complete YouTube video link." : "YouTube blocks direct audio access. Add the recording file below."}</p>
-              <button className="source-file-button" onClick={() => fileInput.current?.click()}>{file ? `✓ ${file.name}` : "Choose audio or video file"}</button>
-              <input ref={sourceMode === "youtube" ? fileInput : undefined} className="source-file-input" type="file" accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm" onChange={(event: ChangeEvent<HTMLInputElement>) => chooseFile(event.target.files?.[0])} />
+              <p className={youtubeUrl && !validYoutubeUrl ? "input-error" : ""}>{youtubeUrl && !validYoutubeUrl ? "Enter a complete YouTube video link." : "Public YouTube audio is downloaded locally; the first 5 minutes are transcribed."}</p>
             </div>
           )}
 
           <div className="transcription-options">
-            <div className="option-heading"><span className="eyebrow">TRANSCRIPTION</span><span className="quality-pill">Balanced</span></div>
-            <label><span><b>Melody extraction</b><small>Focus on the clearest lead line</small></span><input type="checkbox" defaultChecked /></label>
-            <label><span><b>Create accompaniment</b><small>Build playable supporting parts</small></span><input type="checkbox" defaultChecked /></label>
-            <label><span><b>Detect chords</b><small>Add harmonic symbols above staves</small></span><input type="checkbox" defaultChecked /></label>
+            <div className="option-heading"><span className="eyebrow">PIANO TRANSCRIPTION</span><span className="quality-pill">Piano AI + cleanup</span></div>
+            <label><span><b>Simultaneous notes</b><small>Detect chords instead of one melody line</small></span><input type="checkbox" checked readOnly /></label>
+            <label><span><b>Grand staff</b><small>Split piano notes across treble and bass</small></span><input type="checkbox" checked readOnly /></label>
+            <label><span><b>Local processing</b><small>The model runs on this computer</small></span><input type="checkbox" checked readOnly /></label>
           </div>
 
           <button className="button transcribe" onClick={analyzeSource} disabled={Boolean(analysis)}>
-            <span>✦</span> {analysis ? "Transcribing…" : "Generate score"}
+            <span>✦</span> {analysis ? "Transcribing piano…" : "Transcribe piano"}
           </button>
           {analysis && (
             <div className="analysis-card" role="status">
@@ -528,18 +951,18 @@ export function ScoreCraft() {
                 <input value={composer} onChange={(event) => setComposer(event.target.value)} aria-label="Composer or arranger" />
                 <div className="score-meta"><span>Andante, con moto</span><span>♩ = {tempo}</span></div>
               </div>
-              <div className="chord-line"><span>G</span><span>D/F♯</span><span>Em</span><span>Cmaj7</span><span>G/B</span><span>Am7</span><span>D</span></div>
-              <div className="staff-system">
-                <span className="system-brace" aria-hidden="true">{"{"}</span>
-                {tracks.map((track) => <ScoreStaff key={track.id} track={track} selectedNote={selectedNote} onSelect={setSelectedNote} />)}
-                {!tracks.length && <div className="empty-score">Add an instrument to start a new score.</div>}
+              <div className="piano-score">
+                {systemStarts.map((systemStart, systemIndex) => (
+                  <PianoSystem key={systemStart} track={tracks[0]} systemStart={systemStart} showLabel={systemIndex === 0} selectedNote={selectedNote} onSelect={setSelectedNote} />
+                ))}
               </div>
               <div className="page-footer"><span>ScoreCraft transcription</span><span>1</span></div>
             </div>
           </div>
 
           <div className="transport">
-            <div className="time-display"><b>00:{currentTime.toString().padStart(2, "0")}</b><span>/ 00:{duration}</span></div>
+            <div className="time-display"><b>{formatClock(currentTime)}</b><span>/ {formatClock(duration)}</span></div>
+            <span className="playback-source">Transcribed piano</span>
             <button className={looping ? "transport-active" : ""} onClick={() => setLooping(!looping)} title="Loop">↻</button>
             <button className="play-button" onClick={startPlayback} aria-label={playing ? "Pause score" : "Play score"}>{playing ? "Ⅱ" : "▶"}</button>
             <button onClick={() => stopPlayback(true)} title="Stop">■</button>
@@ -550,13 +973,13 @@ export function ScoreCraft() {
         </section>
 
         <aside className="mixer-panel">
-          <div className="mixer-heading"><span className="eyebrow">INSTRUMENTS</span><span>{tracks.length} parts</span></div>
+          <div className="mixer-heading"><span className="eyebrow">PIANO</span><span>1 grand-staff part</span></div>
           <div className="track-list">
             {tracks.map((track) => (
               <div className="mixer-track" key={track.id}>
                 <div className="instrument-avatar" style={{ background: track.color }}>{track.abbreviation.slice(0, 2)}</div>
                 <div className="track-main">
-                  <div className="track-name"><b>{track.name}</b><button className="remove-track" onClick={() => removeInstrument(track.id)} aria-label={`Remove ${track.name}`} title={`Remove ${track.name}`}>×</button></div>
+                  <div className="track-name"><b>{track.name}</b><span>Treble + bass</span></div>
                   <div className="track-controls">
                     <button className={track.muted ? "active" : ""} onClick={() => updateTrack(track.id, { muted: !track.muted })}>M</button>
                     <button className={track.solo ? "active solo" : ""} onClick={() => updateTrack(track.id, { solo: !track.solo })}>S</button>
@@ -567,15 +990,6 @@ export function ScoreCraft() {
               </div>
             ))}
           </div>
-          <div className="add-wrap">
-            <button className="add-instrument" onClick={() => setAddMenu(!addMenu)}>＋ Add instrument</button>
-            {addMenu && (
-              <div className="floating-menu instrument-menu">
-                {instrumentPresets.map((preset) => <button key={preset[0]} onClick={() => addInstrument(preset)}><span style={{ background: preset[3] }}>{preset[1]}</span><b>{preset[0]}</b></button>)}
-              </div>
-            )}
-          </div>
-
           <div className="inspector">
             <div className="mixer-heading"><span className="eyebrow">SELECTION</span><span>{selected ? noteLabel(selected.midi) : "—"}</span></div>
             <div className="selection-card">

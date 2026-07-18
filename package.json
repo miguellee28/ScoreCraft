@@ -14,10 +14,13 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@spotify/basic-pitch": "^1.0.1",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "vexflow": "^5.0.0",
+    "youtube-dl-exec": "^3.1.9"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

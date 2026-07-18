@@ -15,8 +15,10 @@ test("renders the ScoreCraft music workspace", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /<title>ScoreCraft/);
-  assert.match(html, /Generate score/);
-  assert.match(html, /INSTRUMENTS/);
+  assert.match(html, /Transcribe piano/);
+  assert.match(html, /1 grand-staff part/);
+  assert.match(html, /Piano AI \+ cleanup/);
+  assert.match(html, /Transcribed piano/);
   assert.match(html, /Moonlit Waltz/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
