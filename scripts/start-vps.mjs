@@ -3,7 +3,7 @@ import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startProdServer } from "vinext/server/prod-server";
+import { startProdServer, tryServeStatic } from "vinext/server/prod-server";
 import { localPianoTranscriptionPlugin } from "../local-piano-transcription-plugin.ts";
 import { localYouTubeAudioPlugin } from "../local-youtube-plugin.ts";
 
@@ -30,6 +30,11 @@ export function attachLocalRoutes(server, root = process.cwd()) {
   }
 
   const middleware = [
+    async (request, response, next) => {
+      const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+      const served = await tryServeStatic(request, response, resolve(root, "dist", "client"), pathname, true);
+      if (!served) next();
+    },
     captureMiddleware(localYouTubeAudioPlugin(), root),
     captureMiddleware(localPianoTranscriptionPlugin(), root),
   ];
