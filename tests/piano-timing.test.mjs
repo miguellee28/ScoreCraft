@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   PIANO_TICK_BEATS,
+  makePianoScorePlayable,
   mergePianoDurationHints,
   quantizeBeat,
   quantizePianoEvents,
@@ -114,4 +115,32 @@ test("holds sparse melodic pickups until their structural release", () => {
   ], 55);
   assert.equal(repaired[0].beats, .5);
   assert.equal(repaired[3].beats, .5);
+});
+
+test("reduces pedal-heavy transcription to a playable two-hand score", () => {
+  const notes = [
+    { midi: 48, startBeat: 0, beats: 4, velocity: 90 },
+    { midi: 55, startBeat: 0, beats: 2, velocity: 76 },
+    { midi: 60, startBeat: 0, beats: 1, velocity: 82 },
+    { midi: 40, startBeat: .5, beats: 3, velocity: 88 },
+    { midi: 57, startBeat: .5, beats: 1, velocity: 78 },
+    { midi: 64, startBeat: .5, beats: 1, velocity: 84 },
+  ];
+  const playable = makePianoScorePlayable(notes);
+
+  assert.ok(playable.every((note) => Number.isInteger(note.startBeat * 4)));
+  const groups = new Map();
+  playable.forEach((note) => {
+    const key = `${note.startBeat}:${note.staff}`;
+    groups.set(key, [...(groups.get(key) ?? []), note]);
+  });
+  groups.forEach((group) => {
+    assert.ok(group.length <= 5);
+    assert.ok(Math.max(...group.map((note) => note.midi)) - Math.min(...group.map((note) => note.midi)) <= 12);
+    assert.ok(group.every((note) => note.beats === group[0].beats));
+  });
+  assert.equal(playable.find((note) => note.midi === 48)?.staff, 2);
+  assert.equal(playable.find((note) => note.midi === 55)?.staff, 2);
+  assert.equal(playable.find((note) => note.midi === 60)?.staff, 1);
+  assert.equal(playable.find((note) => note.midi === 48)?.beats, .5);
 });

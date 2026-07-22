@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import toneMidi from "@tonejs/midi";
-import { quantizePianoEvents } from "../app/piano-timing.ts";
+import { makePianoScorePlayable, quantizePianoEvents } from "../app/piano-timing.ts";
 
 const [predictedPath, referencePath, durationHintsPath] = process.argv.slice(2);
 if (!predictedPath || !referencePath) {
@@ -22,6 +22,7 @@ const durationHints = durationHintsPath
   ? (JSON.parse(await readFile(durationHintsPath, "utf8")).notes ?? [])
   : [];
 const predicted = quantizePianoEvents(predictedEvents, tempo, "transkun-2.0.1");
+const playableScore = makePianoScorePlayable(predicted);
 const reference = referenceMidi.tracks.flatMap((track) => track.notes).map((note, id) => ({
   id,
   midi: note.midi,
@@ -62,6 +63,14 @@ const result = {
   exactDurationF1: f1(durationMatches),
   exactVelocityMatches: velocityMatches,
   durationHints: durationHints.length,
+  playableScoreNotes: playableScore.length,
+  playableMaximumHandSpan: Math.max(0, ...[...new Set(playableScore.map((note) => `${note.startBeat}:${note.staff}`))]
+    .map((key) => {
+      const group = playableScore.filter((note) => `${note.startBeat}:${note.staff}` === key);
+      return Math.max(...group.map((note) => note.midi)) - Math.min(...group.map((note) => note.midi));
+    })),
+  playableMaximumNotesPerHand: Math.max(0, ...[...new Set(playableScore.map((note) => `${note.startBeat}:${note.staff}`))]
+    .map((key) => playableScore.filter((note) => `${note.startBeat}:${note.staff}` === key).length)),
 };
 console.log(JSON.stringify(result, null, 2));
 if (onsetMatches !== predicted.length || onsetMatches !== reference.length) process.exitCode = 1;

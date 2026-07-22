@@ -16,6 +16,10 @@ export type QuantizedPianoEvent = TimedPianoEvent & {
   beats: number;
 };
 
+export type PlayablePianoEvent<T extends { midi: number; startBeat: number; beats: number }> = T & {
+  staff: 1 | 2;
+};
+
 export function quantizeBeat(value: number) {
   return Math.round(value * PIANO_TICKS_PER_BEAT) / PIANO_TICKS_PER_BEAT;
 }
@@ -309,4 +313,123 @@ export function quantizePianoEvents(
   });
   if (engine !== "transkun-2.0.1") return quantized;
   return repairScoreContextDurations(quantized, tempo);
+}
+
+function handSpan<T extends { midi: number }>(notes: T[]) {
+  if (notes.length < 2) return 0;
+  return Math.max(...notes.map((note) => note.midi)) - Math.min(...notes.map((note) => note.midi));
+}
+
+/**
+ * Produces a practical two-hand score reduction without changing the detailed
+ * events used by audio playback. Pedal releases are collapsed into one chordal
+ * voice per hand, upper accompaniment can cross to the treble staff, and no
+ * written hand is asked to strike more than five notes or span over an octave.
+ */
+export function makePianoScorePlayable<T extends {
+  midi: number;
+  startBeat: number;
+  beats: number;
+  velocity?: number;
+}>(events: T[]): Array<PlayablePianoEvent<T>> {
+  if (!events.length) return [];
+
+  // A 16th-note grid keeps genuine rhythm while absorbing 64th-note onset jitter
+  // and near-simultaneous rolled attacks that otherwise make the score unreadable.
+  const snapped = events.map((note) => ({
+    ...note,
+    startBeat: Math.max(0, Math.round(note.startBeat * 4) / 4),
+    beats: Math.max(0.25, Math.round(note.beats * 4) / 4),
+  }));
+  const unique = new Map<string, typeof snapped[number]>();
+  snapped.forEach((note) => {
+    const key = `${note.startBeat}:${note.midi}`;
+    const previous = unique.get(key);
+    if (!previous || (note.velocity ?? 64) > (previous.velocity ?? 64)) unique.set(key, note);
+  });
+  const notes = [...unique.values()].sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
+  const onsetGroups = new Map<number, typeof notes>();
+  notes.forEach((note) => onsetGroups.set(note.startBeat, [...(onsetGroups.get(note.startBeat) ?? []), note]));
+
+  const limitHand = (handNotes: typeof notes, staff: 1 | 2) => {
+    if (handNotes.length <= 5 && handSpan(handNotes) <= 12) return handNotes;
+    const windows = handNotes.map((anchor) => handNotes.filter((note) => (
+      note.midi >= anchor.midi && note.midi <= anchor.midi + 12
+    )));
+    return windows
+      .map((window) => [...window]
+        .sort((a, b) => {
+          const aOuter = staff === 1 ? a.midi : -a.midi;
+          const bOuter = staff === 1 ? b.midi : -b.midi;
+          return (((b.velocity ?? 64) + bOuter * 2) - ((a.velocity ?? 64) + aOuter * 2));
+        })
+        .slice(0, 5))
+      .sort((a, b) => {
+        const score = (group: typeof notes) => group.reduce((sum, note) => (
+          sum + (note.velocity ?? 64) + (staff === 1 ? note.midi : 127 - note.midi) * 2
+        ), 0);
+        return score(b) - score(a);
+      })[0] ?? [];
+  };
+
+  // Trace a single treble melody through neighbouring onsets. Middle-register
+  // chord tones stay in the accompaniment instead of jumping between staves.
+  const starts = [...onsetGroups.keys()].sort((a, b) => a - b);
+  const topAt = new Map(starts.map((start) => [
+    start,
+    [...(onsetGroups.get(start) ?? [])].sort((a, b) => b.midi - a.midi || (b.velocity ?? 64) - (a.velocity ?? 64))[0],
+  ]));
+  const melodyStarts = new Set(starts.filter((start) => {
+    const group = onsetGroups.get(start) ?? [];
+    const top = topAt.get(start);
+    return Boolean(top && (top.midi >= 60 || (group.length === 1 && top.midi >= 57)));
+  }));
+  let addedMelody = true;
+  while (addedMelody) {
+    addedMelody = false;
+    starts.forEach((start, index) => {
+      if (melodyStarts.has(start)) return;
+      const top = topAt.get(start);
+      if (!top || top.midi < 52) return;
+      const neighbours = [starts[index - 1], starts[index + 1]].filter((value): value is number => value !== undefined);
+      if (neighbours.some((nearbyStart) => {
+        const nearbyTop = topAt.get(nearbyStart);
+        return melodyStarts.has(nearbyStart)
+          && Math.abs(nearbyStart - start) <= 1
+          && Boolean(nearbyTop && Math.abs(nearbyTop.midi - top.midi) <= 7);
+      })) {
+        melodyStarts.add(start);
+        addedMelody = true;
+      }
+    });
+  }
+
+  const assigned: Array<PlayablePianoEvent<T>> = [];
+  onsetGroups.forEach((group, start) => {
+    const ordered = [...group].sort((a, b) => a.midi - b.midi);
+    const melody = melodyStarts.has(start) ? topAt.get(start) : undefined;
+    const accompaniment = melody ? ordered.filter((note) => note !== melody) : ordered;
+    limitHand(accompaniment, 2).forEach((note) => assigned.push({ ...note, staff: 2 }));
+    if (melody) assigned.push({ ...melody, staff: 1 });
+  });
+
+  // One release per hand/onset represents pedal resonance as playable chordal
+  // notation instead of several overlapping finger-held voices.
+  ([1, 2] as const).forEach((staff) => {
+    const handNotes = assigned.filter((note) => note.staff === staff);
+    const starts = [...new Set(handNotes.map((note) => note.startBeat))].sort((a, b) => a - b);
+    starts.forEach((start, index) => {
+      const group = handNotes.filter((note) => sameBeat(note.startBeat, start));
+      const nextStart = starts[index + 1];
+      const detected = Math.max(0.25, ...group.map((note) => note.beats));
+      // Between attacks, hold the written hand instead of printing a chain of
+      // tiny acoustic releases followed by rests. Playback keeps the raw decay.
+      const writtenDuration = nextStart === undefined
+        ? detected
+        : Math.max(0.25, nextStart - start);
+      group.forEach((note) => { note.beats = writtenDuration; });
+    });
+  });
+
+  return assigned.sort((a, b) => a.startBeat - b.startBeat || a.staff - b.staff || a.midi - b.midi);
 }

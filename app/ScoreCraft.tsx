@@ -12,6 +12,7 @@ import {
 import {
   PIANO_TICK_BEATS,
   PIANO_TICKS_PER_BEAT,
+  makePianoScorePlayable,
   quantizeBeat,
   quantizePianoEvents,
 } from "./piano-timing";
@@ -25,6 +26,7 @@ type Note = {
   startSeconds?: number;
   durationSeconds?: number;
   chord?: string;
+  staff?: 1 | 2;
 };
 type Track = {
   id: number;
@@ -411,7 +413,9 @@ function PianoSystem({
       ) => {
         const groups = new Map<number, Array<Note & { index: number }>>();
         indexed
-          .filter((note) => clef === "treble" ? note.midi >= 60 : note.midi < 60)
+          .filter((note) => clef === "treble"
+            ? (note.staff ?? (note.midi >= 60 ? 1 : 2)) === 1
+            : (note.staff ?? (note.midi >= 60 ? 1 : 2)) === 2)
           .filter((note) => note.startBeat >= measureStart && note.startBeat < measureEnd)
           .forEach((note) => {
             const onset = quantizeBeat(note.startBeat);
@@ -683,7 +687,8 @@ export function ScoreCraft() {
           setMessage(`QA transcription ready with ${quantized.length} detected piano notes.`);
           return;
         }
-        notes = transcription.engine === "transkun-2.0.1" ? quantized : cleanPianoNotes(quantized);
+        const scoreNotes = transcription.engine === "transkun-2.0.1" ? quantized : cleanPianoNotes(quantized);
+        notes = makePianoScorePlayable(scoreNotes);
       } catch (error) {
         setAnalysis(null);
         setMessage(error instanceof Error ? `Piano transcription failed: ${error.message}` : "The browser could not transcribe this audio.");
@@ -923,7 +928,7 @@ export function ScoreCraft() {
       const measureEndTick = measureStartTick + measureTicks;
       type Segment = Note & { startTick: number; endTick: number; tieStart: boolean; tieStop: boolean };
       const segments = piano.notes
-        .filter((note) => staff === 1 ? note.midi >= 60 : note.midi < 60)
+        .filter((note) => (note.staff ?? (note.midi >= 60 ? 1 : 2)) === staff)
         .map((note): Segment => {
           const originalStart = Math.round(note.startBeat * divisions);
           const originalEnd = originalStart + Math.max(1, Math.round(note.beats * divisions));
