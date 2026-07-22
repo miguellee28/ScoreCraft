@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, rm, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Plugin } from "vite";
 import type { Payload } from "youtube-dl-exec";
 
@@ -71,7 +71,7 @@ function sendJson(response: ServerResponse, status: number, message: string) {
 
 function friendlyYouTubeError(error: unknown) {
   const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";
-  if (/ENOENT|yt-dlp(?:\.exe)?.*(?:not found|cannot find|no such file)/i.test(message)) {
+  if (/spawn .*yt-dlp(?:\.exe)?.*ENOENT|yt-dlp(?:\.exe)?.*(?:not found|cannot find|no such file)/i.test(message)) {
     return "The YouTube downloader is not installed on this server. Run npm install without --ignore-scripts, then restart ScoreCraft.";
   }
   if (/ffmpeg.*(?:not found|not installed)|ffprobe.*(?:not found|not installed)/i.test(message)) {
@@ -80,7 +80,15 @@ function friendlyYouTubeError(error: unknown) {
   if (/timed?\s*out|timeout/i.test(message)) {
     return "YouTube took too long to respond. Try again or choose a shorter section.";
   }
+  if (/sign in.*(?:not a bot|confirm)|confirm you(?:'|’)?re not a bot/i.test(message)) {
+    return "YouTube blocked this VPS address. Export YouTube cookies to the server and set SCORECRAFT_YOUTUBE_COOKIES to that file, then restart ScoreCraft.";
+  }
   return message;
+}
+
+function youtubeAuthenticationOptions() {
+  const cookieFile = process.env.SCORECRAFT_YOUTUBE_COOKIES?.trim();
+  return cookieFile ? { cookies: resolve(cookieFile) } : {};
 }
 
 export function localYouTubeAudioPlugin(): Plugin {
@@ -103,6 +111,7 @@ export function localYouTubeAudioPlugin(): Plugin {
           const canonicalUrl = canonicalYouTubeUrl(body.url);
           const { default: youtubeDl } = await import("youtube-dl-exec");
           const metadata = await youtubeDl(canonicalUrl, {
+            ...youtubeAuthenticationOptions(),
             dumpSingleJson: true,
             skipDownload: true,
             noPlaylist: true,
@@ -140,6 +149,7 @@ export function localYouTubeAudioPlugin(): Plugin {
             if (clientClosed) return;
             await rm(outputPath, { force: true }).catch(() => undefined);
             const process = youtubeDl.exec(canonicalUrl, {
+              ...youtubeAuthenticationOptions(),
               output: downloaderOutput,
               format: format.format_id,
               ...(needsTrim ? {

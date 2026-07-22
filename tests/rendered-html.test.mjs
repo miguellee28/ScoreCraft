@@ -61,6 +61,7 @@ test("keeps exact local transcription playback and print-ready piano export", as
   assert.match(youtubePlugin, /X-ScoreCraft-Download-Attempt/);
   assert.match(youtubePlugin, /downloadSections/);
   assert.match(youtubePlugin, /normalizeYouTubeSegment/);
+  assert.match(youtubePlugin, /SCORECRAFT_YOUTUBE_COOKIES/);
   assert.match(styles, /\.piano-grand-system:nth-child\(4n\)/);
   assert.match(styles, /\/fonts\/bravura\.woff2/);
   assert.equal(samples.filter((name) => name.endsWith(".mp3")).length, 30);

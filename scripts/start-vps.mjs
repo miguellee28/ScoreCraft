@@ -80,6 +80,16 @@ async function printRuntimeWarnings() {
   if (ffmpeg.error || ffmpeg.status !== 0) {
     console.warn("[ScoreCraft] FFmpeg is missing from PATH. Install FFmpeg before transcribing YouTube segments.");
   }
+
+  const cookieFile = process.env.SCORECRAFT_YOUTUBE_COOKIES?.trim();
+  if (cookieFile) {
+    try {
+      await access(resolve(cookieFile));
+      console.log(`[ScoreCraft] YouTube cookies: ${resolve(cookieFile)}`);
+    } catch {
+      console.warn(`[ScoreCraft] SCORECRAFT_YOUTUBE_COOKIES does not point to a readable file: ${resolve(cookieFile)}`);
+    }
+  }
 }
 
 export async function main() {

@@ -41,6 +41,18 @@ npm start
 
 Do not use `npm ci --ignore-scripts`: `youtube-dl-exec` uses its install script to download the `yt-dlp` binary. At startup, ScoreCraft reports whether `yt-dlp` and FFmpeg were found. Keep `node_modules` on the VPS and run `npm ci` again after pulling dependency changes.
 
+YouTube sometimes blocks datacenter IP addresses with a “confirm you’re not a bot” response. In that case, export a Netscape-format `cookies.txt` from a dedicated YouTube account, copy it outside the repository with owner-only permissions, and point ScoreCraft to it before restarting PM2:
+
+```bash
+install -d -m 700 /root/.config/scorecraft
+chmod 600 /root/.config/scorecraft/youtube-cookies.txt
+export SCORECRAFT_YOUTUBE_COOKIES=/root/.config/scorecraft/youtube-cookies.txt
+pm2 restart scorecraft --update-env
+pm2 save
+```
+
+Cookie files contain account credentials. Never commit one, paste it into logs, or use a primary Google account for an automated downloader.
+
 `npm start -- --port 8080` changes the port; the default is `3000`. When using Nginx or another reverse proxy, allow request bodies up to 150 MB and use a proxy read timeout longer than four minutes.
 
 ## Accuracy verification
