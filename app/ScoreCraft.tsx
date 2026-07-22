@@ -16,6 +16,7 @@ import {
   quantizeBeat,
   quantizePianoEvents,
 } from "./piano-timing";
+import { cleanPianoNotes } from "./piano-cleanup";
 
 type Note = {
   midi: number;
@@ -143,7 +144,7 @@ function inferChordProgression(notes: Note[]) {
   return progression;
 }
 
-function cleanPianoNotes(notes: Note[]) {
+function cleanPianoNotesLegacy(notes: Note[]) {
   const unique = new Map<string, Note>();
   notes
     .filter((note) => (note.velocity ?? 127) >= 40)

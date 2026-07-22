@@ -25,9 +25,10 @@ test("renders the ScoreCraft music workspace", async () => {
 });
 
 test("keeps exact local transcription playback and print-ready piano export", async () => {
-  const [component, timing, transcription, pianoPlugin, youtubePlugin, styles, samples] = await Promise.all([
+  const [component, timing, cleanup, transcription, pianoPlugin, youtubePlugin, styles, samples] = await Promise.all([
     readFile(new URL("../app/ScoreCraft.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/piano-timing.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/piano-cleanup.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/piano-transcription.ts", import.meta.url), "utf8"),
     readFile(new URL("../local-piano-transcription-plugin.ts", import.meta.url), "utf8"),
     readFile(new URL("../local-youtube-plugin.ts", import.meta.url), "utf8"),
@@ -46,6 +47,8 @@ test("keeps exact local transcription playback and print-ready piano export", as
   assert.match(component, /\*\* 1\.7/);
   assert.match(component, /new StaveTie/);
   assert.match(timing, /const PIANO_TICKS_PER_BEAT = 16/);
+  assert.match(cleanup, /const HARMONY_WINDOW_BEATS = 1/);
+  assert.match(cleanup, /function removeBracketedBassArtifacts/);
   assert.match(component, /\[1, \["64th", false\]\]/);
   assert.match(component, /<backup><duration>\$\{measureTicks\}<\/duration><\/backup>/);
   assert.doesNotMatch(component, /available - engravedDuration <= 0\.25/);
