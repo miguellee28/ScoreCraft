@@ -70,8 +70,10 @@ function sendJson(response: ServerResponse, status: number, message: string) {
 }
 
 function friendlyYouTubeError(error: unknown) {
+  const processError = error as NodeJS.ErrnoException | undefined;
   const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";
-  if (/spawn .*yt-dlp(?:\.exe)?.*ENOENT|yt-dlp(?:\.exe)?.*(?:not found|cannot find|no such file)/i.test(message)) {
+  if ((processError?.code === "ENOENT" && /yt-dlp/i.test(processError.syscall ?? ""))
+    || /spawn .*yt-dlp(?:\.exe)?.*ENOENT|yt-dlp(?:\.exe)?.*(?:not found|cannot find|no such file)/i.test(message)) {
     return "The YouTube downloader is not installed on this server. Run npm install without --ignore-scripts, then restart ScoreCraft.";
   }
   if (/ffmpeg.*(?:not found|not installed)|ffprobe.*(?:not found|not installed)/i.test(message)) {
@@ -83,7 +85,7 @@ function friendlyYouTubeError(error: unknown) {
   if (/sign in.*(?:not a bot|confirm)|confirm you(?:'|’)?re not a bot/i.test(message)) {
     return "YouTube blocked this VPS address. Export YouTube cookies to the server and set SCORECRAFT_YOUTUBE_COOKIES to that file, then restart ScoreCraft.";
   }
-  return message;
+  return message || "YouTube audio could not be loaded.";
 }
 
 function youtubeAuthenticationOptions() {
