@@ -25,6 +25,8 @@ Open the localhost URL printed by `npm run dev`. The first Transkun setup downlo
 
 Transkun analyzes overlapping audio windows and is intentionally slower than the browser fallback. On a CPU-only machine, a three-to-four-minute recording can take several minutes. Keep the local terminal open until transcription finishes.
 
+For a YouTube source, enter Start and End as seconds, `M:SS`, or `H:MM:SS`. Leaving End blank transcribes from Start to the video end, capped at five minutes. ScoreCraft downloads only the selected section locally, which reduces both download and transcription time.
+
 ## Accuracy verification
 
 Compare a generated Transkun MIDI with a reference MIDI:

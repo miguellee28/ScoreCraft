@@ -35,6 +35,9 @@ test("keeps exact local transcription playback and print-ready piano export", as
     readdir(new URL("../public/salamander-piano/", import.meta.url)),
   ]);
   assert.match(component, /Play preserves all/);
+  assert.match(component, /youtube-start/);
+  assert.match(component, /youtube-end/);
+  assert.match(component, /startSeconds: youtubeStartSeconds/);
   assert.match(component, /\/salamander-piano\/\$\{midi\}\.mp3/);
   assert.match(component, /quantizePianoEvents/);
   assert.match(component, /const audioOrigin = context\.currentTime - startAt/);
@@ -56,6 +59,8 @@ test("keeps exact local transcription playback and print-ready piano export", as
   assert.match(pianoPlugin, /parsePianoMidi/);
   assert.match(youtubePlugin, /const maxDownloadAttempts = 3/);
   assert.match(youtubePlugin, /X-ScoreCraft-Download-Attempt/);
+  assert.match(youtubePlugin, /downloadSections/);
+  assert.match(youtubePlugin, /normalizeYouTubeSegment/);
   assert.match(styles, /\.piano-grand-system:nth-child\(4n\)/);
   assert.match(styles, /\/fonts\/bravura\.woff2/);
   assert.equal(samples.filter((name) => name.endsWith(".mp3")).length, 30);

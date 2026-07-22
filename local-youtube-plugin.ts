@@ -1,10 +1,15 @@
+import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import type { Plugin } from "vite";
 import type { Payload } from "youtube-dl-exec";
 
 const MAX_BODY_BYTES = 8 * 1024;
 const MAX_AUDIO_BYTES = 150 * 1024 * 1024;
 const MAX_DURATION_SECONDS = 15 * 60;
+const MAX_SEGMENT_SECONDS = 5 * 60;
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
 export function canonicalYouTubeUrl(input: string) {
@@ -36,7 +41,26 @@ async function readJsonBody(request: IncomingMessage) {
     if (size > MAX_BODY_BYTES) throw new Error("Request is too large.");
     chunks.push(buffer);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as { url?: unknown };
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+    url?: unknown;
+    startSeconds?: unknown;
+    endSeconds?: unknown;
+  };
+}
+
+export function normalizeYouTubeSegment(
+  startValue: unknown,
+  endValue: unknown,
+  videoDuration: number,
+) {
+  const start = startValue === undefined ? 0 : Number(startValue);
+  const end = endValue === undefined ? Math.min(videoDuration, start + MAX_SEGMENT_SECONDS) : Number(endValue);
+  if (!Number.isFinite(start) || start < 0) throw new Error("Start time must be zero or later.");
+  if (start >= videoDuration) throw new Error("Start time is after the video ends.");
+  if (!Number.isFinite(end) || end <= start) throw new Error("End time must be after the start time.");
+  if (end > videoDuration + 0.01) throw new Error("End time is after the video ends.");
+  if (end - start > MAX_SEGMENT_SECONDS) throw new Error("Choose a YouTube segment of 5 minutes or less.");
+  return { start, end: Math.min(end, videoDuration) };
 }
 
 function sendJson(response: ServerResponse, status: number, message: string) {
@@ -78,6 +102,7 @@ export function localYouTubeAudioPlugin(): Plugin {
 
           if (metadata.is_live || metadata.live_status === "is_live") throw new Error("Live streams are not supported.");
           if (!metadata.duration || metadata.duration > MAX_DURATION_SECONDS) throw new Error("Choose a video shorter than 15 minutes.");
+          const segment = normalizeYouTubeSegment(body.startSeconds, body.endSeconds, metadata.duration);
 
           const format = metadata.formats
             .filter((item) => item.vcodec === "none" && item.acodec !== "none" && item.ext === "m4a")
@@ -85,17 +110,28 @@ export function localYouTubeAudioPlugin(): Plugin {
           if (!format) throw new Error("No browser-compatible audio track was found for this video.");
           if ((format.filesize ?? format.filesize_approx ?? 0) > MAX_AUDIO_BYTES) throw new Error("This audio track is larger than 150 MB.");
 
-          let bytes = 0;
+          const segmentDirectory = join(server.config.root, "tmp", "youtube-segments");
+          await mkdir(segmentDirectory, { recursive: true });
+          const outputName = `${randomUUID()}.m4a`;
+          const outputPath = join(segmentDirectory, outputName);
+          const downloaderOutput = join("tmp", "youtube-segments", outputName);
           let activeProcess: ReturnType<typeof youtubeDl.exec> | null = null;
           let responseStarted = false;
           let clientClosed = false;
           const maxDownloadAttempts = 3;
+          const needsTrim = segment.start > 0.01 || segment.end < metadata.duration - 0.01;
+          const cleanup = () => { void rm(outputPath, { force: true }).catch(() => undefined); };
 
-          const runDownload = (attempt: number) => {
+          const runDownload = async (attempt: number) => {
             if (clientClosed) return;
+            await rm(outputPath, { force: true }).catch(() => undefined);
             const process = youtubeDl.exec(canonicalUrl, {
-              output: "-",
+              output: downloaderOutput,
               format: format.format_id,
+              ...(needsTrim ? {
+                downloadSections: `*${segment.start}-${segment.end}`,
+                forceKeyframesAtCuts: true,
+              } : {}),
               noPlaylist: true,
               ignoreConfig: true,
               noWarnings: true,
@@ -104,20 +140,45 @@ export function localYouTubeAudioPlugin(): Plugin {
               retries: 3,
               extractorRetries: 3,
               jsRuntimes: "node",
-            }, { timeout: 180_000, windowsHide: true });
+            }, { timeout: 180_000, windowsHide: true, cwd: server.config.root });
             activeProcess = process;
             let stderr = "";
             let settled = false;
 
-            const finishAttempt = (success: boolean, detail = "") => {
+            const finishAttempt = async (success: boolean, detail = "") => {
               if (settled) return;
               settled = true;
-              if (success && responseStarted) {
-                response.end();
-                return;
+              activeProcess = null;
+              if (success && !clientClosed) {
+                try {
+                  const info = await stat(outputPath);
+                  if (info.size > MAX_AUDIO_BYTES) {
+                    cleanup();
+                    return sendJson(response, 413, "The downloaded audio exceeded 150 MB.");
+                  }
+                  responseStarted = true;
+                  response.statusCode = 200;
+                  response.setHeader("Content-Type", "audio/mp4");
+                  response.setHeader("Content-Length", String(info.size));
+                  response.setHeader("Cache-Control", "no-store");
+                  response.setHeader("Content-Disposition", "inline; filename=scorecraft-youtube.m4a");
+                  response.setHeader("X-ScoreCraft-Title", encodeURIComponent(metadata.title || "YouTube piano transcription"));
+                  response.setHeader("X-ScoreCraft-Duration", String(segment.end - segment.start));
+                  response.setHeader("X-ScoreCraft-Segment-Start", String(segment.start));
+                  response.setHeader("X-ScoreCraft-Segment-End", String(segment.end));
+                  response.setHeader("X-ScoreCraft-Download-Attempt", String(attempt + 1));
+                  const stream = createReadStream(outputPath);
+                  stream.once("error", () => response.destroy());
+                  stream.pipe(response);
+                  return;
+                } catch (error) {
+                  detail = error instanceof Error ? error.message : detail;
+                  success = false;
+                }
               }
-              if (!response.headersSent && attempt + 1 < maxDownloadAttempts) {
-                setTimeout(() => runDownload(attempt + 1), 300 * (attempt + 1));
+              cleanup();
+              if (!success && !response.headersSent && !clientClosed && attempt + 1 < maxDownloadAttempts) {
+                setTimeout(() => { void runDownload(attempt + 1); }, 300 * (attempt + 1));
                 return;
               }
               const friendlyDetail = /403|forbidden/i.test(detail)
@@ -128,35 +189,16 @@ export function localYouTubeAudioPlugin(): Plugin {
             };
 
             process.stderr?.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-2000); });
-            process.stdout?.on("data", (chunk: Buffer) => {
-              bytes += chunk.length;
-              if (bytes > MAX_AUDIO_BYTES) {
-                settled = true;
-                process.kill("SIGKILL");
-                if (!response.headersSent) sendJson(response, 413, "The downloaded audio exceeded 150 MB.");
-                else response.destroy();
-                return;
-              }
-              if (!responseStarted) {
-                responseStarted = true;
-                response.statusCode = 200;
-                response.setHeader("Content-Type", "audio/mp4");
-                response.setHeader("Cache-Control", "no-store");
-                response.setHeader("Content-Disposition", "inline; filename=scorecraft-youtube.m4a");
-                response.setHeader("X-ScoreCraft-Title", encodeURIComponent(metadata.title || "YouTube piano transcription"));
-                response.setHeader("X-ScoreCraft-Duration", String(metadata.duration));
-                response.setHeader("X-ScoreCraft-Download-Attempt", String(attempt + 1));
-              }
-              response.write(chunk);
-            });
-            process.once("error", (error) => finishAttempt(false, error.message));
-            process.once("close", (code) => finishAttempt(code === 0, stderr));
+            process.once("error", (error) => { void finishAttempt(false, error.message); });
+            process.once("close", (code) => { void finishAttempt(code === 0, stderr); });
+            void process.catch(() => undefined);
           };
 
-          runDownload(0);
+          void runDownload(0);
           response.once("close", () => {
             clientClosed = true;
             if (activeProcess && !activeProcess.killed) activeProcess.kill("SIGKILL");
+            if (responseStarted) cleanup();
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";

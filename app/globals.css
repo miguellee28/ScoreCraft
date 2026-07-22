@@ -88,7 +88,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .dropzone .upload-symbol { width: 39px; height: 39px; border-radius: 50%; display: grid; place-items: center; background: #efe8f1; color: var(--aubergine); font-family: Georgia, serif; font-size: 20px; }
 .dropzone.has-file { border-style: solid; border-color: #a990ae; }
 
-.youtube-box { min-height: 164px; border: 1px solid var(--line); border-radius: 9px; background: #fffefd; padding: 20px 14px; }
+.youtube-box { min-height: 205px; border: 1px solid var(--line); border-radius: 9px; background: #fffefd; padding: 20px 14px; }
 .youtube-box label { display: block; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
 .youtube-box p { color: #948d95; font-size: 10px; margin: 10px 0 0; }
 .youtube-box p.input-error { color: #b34535; }
@@ -98,6 +98,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #9665a2; outline-
 .url-input { display: flex; align-items: center; border: 1px solid #d8d2d6; background: white; border-radius: 6px; padding: 0 9px; }
 .url-input span { color: #d94f45; font-size: 11px; }
 .url-input input { width: 100%; border: 0; padding: 10px 8px; outline: 0; background: transparent; font-size: 11px; }
+.youtube-time-range { display: grid; grid-template-columns: 1fr 18px 1fr; align-items: end; gap: 5px; margin-top: 11px; }
+.youtube-time-range label { margin: 0; }
+.youtube-time-range label span { display: block; margin-bottom: 4px; color: #7f777f; font-size: 9px; }
+.youtube-time-range input { width: 100%; height: 32px; border: 1px solid #d8d2d6; border-radius: 6px; padding: 0 8px; outline: 0; background: white; color: #332d35; font-size: 10px; font-variant-numeric: tabular-nums; }
+.youtube-time-range input:focus { border-color: var(--aubergine); box-shadow: 0 0 0 2px #69406f18; }
+.youtube-time-range i { padding-bottom: 9px; color: #9a9399; font-size: 9px; font-style: normal; text-align: center; }
 
 .transcription-options { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 16px; }
 .quality-pill { font-size: 9px; color: var(--sage); background: #e9eee8; padding: 3px 7px; border-radius: 20px; font-weight: 700; }

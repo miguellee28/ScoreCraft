@@ -248,6 +248,25 @@ function isValidYouTubeUrl(value: string) {
   }
 }
 
+function parseTimecode(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^\d+(?::\d{1,2}){0,2}$/.test(trimmed)) return Number.NaN;
+  const parts = trimmed.split(":").map(Number);
+  if (parts.length > 1 && parts.slice(1).some((part) => part >= 60)) return Number.NaN;
+  return parts.reduce((seconds, part) => seconds * 60 + part, 0);
+}
+
+function formatTimecode(seconds: number) {
+  const whole = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const remainder = whole % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
 function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedNote: string; onSelect: (id: string) => void }) {
   const container = useRef<HTMLDivElement>(null);
   const bassClef = track.name === "Cello" || track.name === "Double bass";
@@ -534,6 +553,8 @@ export function ScoreCraft() {
   const [sourceMode, setSourceMode] = useState<"upload" | "youtube">("upload");
   const [file, setFile] = useState<File | null>(null);
   const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [youtubeStart, setYoutubeStart] = useState("0:00");
+  const [youtubeEnd, setYoutubeEnd] = useState("");
   const [title, setTitle] = useState("Moonlit Waltz");
   const [composer, setComposer] = useState("Arranged with ScoreCraft");
   const [tracks, setTracks] = useState<Track[]>(baseTracks);
@@ -557,7 +578,20 @@ export function ScoreCraft() {
   const duration = Math.max(1, Math.ceil(sourceDuration ?? totalBeats * 60 / tempo));
 
   const validYoutubeUrl = isValidYouTubeUrl(youtubeUrl.trim());
-  const sourceReady = sourceMode === "youtube" ? validYoutubeUrl : Boolean(file);
+  const youtubeStartSeconds = parseTimecode(youtubeStart) ?? 0;
+  const youtubeEndSeconds = parseTimecode(youtubeEnd);
+  const youtubeRangeError = Number.isNaN(youtubeStartSeconds)
+    ? "Use Start as seconds, M:SS, or H:MM:SS."
+    : Number.isNaN(youtubeEndSeconds)
+      ? "Use End as seconds, M:SS, or H:MM:SS."
+      : youtubeStartSeconds < 0
+        ? "Start time must be zero or later."
+        : youtubeEndSeconds !== null && youtubeEndSeconds <= youtubeStartSeconds
+          ? "End time must be after Start."
+          : youtubeEndSeconds !== null && youtubeEndSeconds - youtubeStartSeconds > 300
+            ? "Choose a segment of 5 minutes or less."
+            : "";
+  const sourceReady = sourceMode === "youtube" ? validYoutubeUrl && !youtubeRangeError : Boolean(file);
   const selected = useMemo(() => {
     const [trackId, index] = selectedNote.split("-").map(Number);
     return tracks.find((track) => track.id === trackId)?.notes[index];
@@ -628,18 +662,25 @@ export function ScoreCraft() {
   async function analyzeSource() {
     if (!sourceReady) {
       setMessage(sourceMode === "youtube"
-        ? "Enter a complete public YouTube video link first."
+        ? youtubeRangeError || "Enter a complete public YouTube video link first."
         : "Add an audio or video file first");
       return;
     }
     let sourceFile = file;
     if (sourceMode === "youtube") {
-      setAnalysis({ progress: 5, label: "Downloading audio from YouTube" });
+      const rangeLabel = youtubeEndSeconds === null
+        ? `from ${formatTimecode(youtubeStartSeconds)}`
+        : `${formatTimecode(youtubeStartSeconds)}–${formatTimecode(youtubeEndSeconds)}`;
+      setAnalysis({ progress: 5, label: `Downloading YouTube audio ${rangeLabel}` });
       try {
         const response = await fetch("/__local/youtube-audio", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: youtubeUrl.trim() }),
+          body: JSON.stringify({
+            url: youtubeUrl.trim(),
+            startSeconds: youtubeStartSeconds,
+            endSeconds: youtubeEndSeconds ?? undefined,
+          }),
         });
         if (!response.ok) {
           const result = await response.json().catch(() => ({ error: "YouTube audio could not be loaded." })) as { error?: string };
@@ -1213,7 +1254,12 @@ export function ScoreCraft() {
             <div className="youtube-box">
               <label htmlFor="youtube">YouTube link</label>
               <div className="url-input"><span>▶</span><input id="youtube" placeholder="https://youtu.be/…" value={youtubeUrl} onChange={(event) => setYoutubeUrl(event.target.value)} /></div>
-              <p className={youtubeUrl && !validYoutubeUrl ? "input-error" : ""}>{youtubeUrl && !validYoutubeUrl ? "Enter a complete YouTube video link." : "Public YouTube audio is downloaded locally; the first 5 minutes are transcribed."}</p>
+              <div className="youtube-time-range">
+                <label htmlFor="youtube-start"><span>Start</span><input id="youtube-start" inputMode="numeric" placeholder="0:00" value={youtubeStart} onChange={(event) => setYoutubeStart(event.target.value)} /></label>
+                <i>to</i>
+                <label htmlFor="youtube-end"><span>End</span><input id="youtube-end" inputMode="numeric" placeholder="Auto (max 5:00)" value={youtubeEnd} onChange={(event) => setYoutubeEnd(event.target.value)} /></label>
+              </div>
+              <p className={(youtubeUrl && !validYoutubeUrl) || youtubeRangeError ? "input-error" : ""}>{youtubeUrl && !validYoutubeUrl ? "Enter a complete YouTube video link." : youtubeRangeError || "Only this section is downloaded and transcribed locally."}</p>
             </div>
           )}
 
