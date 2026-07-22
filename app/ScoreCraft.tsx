@@ -17,6 +17,7 @@ import {
   quantizePianoEvents,
 } from "./piano-timing";
 import { cleanPianoNotes } from "./piano-cleanup";
+import { detectMusicalKey, MusicalKey, spellMidi } from "./music-key";
 
 type Note = {
   midi: number;
@@ -366,12 +367,14 @@ function ScoreStaff({ track, selectedNote, onSelect }: { track: Track; selectedN
 
 function PianoSystem({
   track,
+  musicalKey,
   systemStart,
   showLabel,
   selectedNote,
   onSelect,
 }: {
   track: Track;
+  musicalKey: MusicalKey;
   systemStart: number;
   showLabel: boolean;
   selectedNote: string;
@@ -395,8 +398,6 @@ function PianoSystem({
       const context = renderer.getContext();
       const firstMeasureWidth = Math.min(330, width * 0.54);
       const laterMeasureWidth = width - firstMeasureWidth + 1;
-      const keyNames = ["c", "c#", "d", "eb", "e", "f", "f#", "g", "ab", "a", "bb", "b"];
-      const accidentalNames = ["", "#", "", "b", "", "", "#", "", "b", "", "b", ""];
       const indexed = track.notes
         .map((note, index) => ({ ...note, index }))
         .filter((note) => note.startBeat >= systemStart && note.startBeat < systemStart + 8);
@@ -459,7 +460,7 @@ function PianoSystem({
               clef,
               keys: rest
                 ? [clef === "treble" ? "b/4" : "d/3"]
-                : sorted.map((note) => `${keyNames[((note.midi % 12) + 12) % 12]}/${Math.floor(note.midi / 12) - 1}`),
+                : sorted.map((note) => spellMidi(note.midi, musicalKey).vexKey),
               duration: `${duration}${rest ? "r" : ""}`,
               autoStem: !rest,
             });
@@ -467,7 +468,7 @@ function PianoSystem({
             if (!rest) {
               if (segmentIndex === 0) {
                 sorted.forEach((note, keyIndex) => {
-                  const accidental = accidentalNames[((note.midi % 12) + 12) % 12];
+                  const accidental = spellMidi(note.midi, musicalKey).accidental;
                   if (accidental) staveNote.addModifier(new Accidental(accidental), keyIndex);
                 });
                 const chord = clef === "treble" ? sorted.find((note) => note.chord)?.chord : undefined;
@@ -515,8 +516,8 @@ function PianoSystem({
         const trebleStave = new Stave(x, 16, measureWidth);
         const bassStave = new Stave(x, 106, measureWidth);
         if (measureIndex === 0) {
-          trebleStave.addClef("treble").addKeySignature("C");
-          bassStave.addClef("bass").addKeySignature("C");
+          trebleStave.addClef("treble").addKeySignature(musicalKey.vexKey);
+          bassStave.addClef("bass").addKeySignature(musicalKey.vexKey);
           if (systemStart === 0) {
             trebleStave.addTimeSignature("4/4");
             bassStave.addTimeSignature("4/4");
@@ -540,7 +541,7 @@ function PianoSystem({
 
     void drawStaff();
     return () => { cancelled = true; };
-  }, [onSelect, selectedNote, systemStart, track]);
+  }, [musicalKey, onSelect, selectedNote, systemStart, track]);
 
   return (
     <div className="staff-row piano-grand-system" style={{ "--track": track.color } as CSSProperties}>
@@ -576,6 +577,7 @@ export function ScoreCraft() {
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const totalBeats = useMemo(() => Math.max(16, ...tracks.flatMap((track) => track.notes.map((note) => note.startBeat + note.beats))), [tracks]);
   const systemStarts = useMemo(() => Array.from({ length: Math.ceil(totalBeats / 8) }, (_, index) => index * 8), [totalBeats]);
+  const musicalKey = useMemo(() => detectMusicalKey(tracks[0]?.notes ?? []), [tracks]);
   const duration = Math.max(1, Math.ceil(sourceDuration ?? totalBeats * 60 / tempo));
 
   const validYoutubeUrl = isValidYouTubeUrl(youtubeUrl.trim());
@@ -923,12 +925,8 @@ export function ScoreCraft() {
   }
 
   function musicXmlPitch(midi: number) {
-    const pitches = [
-      ["C", 0], ["C", 1], ["D", 0], ["E", -1], ["E", 0], ["F", 0],
-      ["F", 1], ["G", 0], ["A", -1], ["A", 0], ["B", -1], ["B", 0],
-    ] as const;
-    const [step, alter] = pitches[((midi % 12) + 12) % 12];
-    return `<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ""}<octave>${Math.floor(midi / 12) - 1}</octave></pitch>`;
+    const pitch = spellMidi(midi, musicalKey);
+    return `<pitch><step>${pitch.step}</step>${pitch.alter ? `<alter>${pitch.alter}</alter>` : ""}<octave>${pitch.octave}</octave></pitch>`;
   }
 
   function exportMusicXml() {
@@ -941,7 +939,7 @@ export function ScoreCraft() {
       const flush = () => {
         const number = measures.length + 1;
         const bassClef = track.name === "Cello" || track.name === "Double bass";
-        const attributes = number === 1 ? `<attributes><divisions>${divisions}</divisions><key><fifths>1</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>${bassClef ? "F" : "G"}</sign><line>${bassClef ? 4 : 2}</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>` : "";
+        const attributes = number === 1 ? `<attributes><divisions>${divisions}</divisions><key><fifths>${musicalKey.fifths}</fifths><mode>${musicalKey.mode}</mode></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>${bassClef ? "F" : "G"}</sign><line>${bassClef ? 4 : 2}</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>` : "";
         if (beats < 4) measure.push(`<note><rest/><duration>${Math.round((4 - beats) * divisions)}</duration><type>${4 - beats >= 2 ? "half" : "quarter"}</type></note>`);
         measures.push(`<measure number="${number}">${attributes}${measure.join("")}</measure>`);
         measure = [];
@@ -1049,7 +1047,7 @@ export function ScoreCraft() {
 
     const measures = Array.from({ length: measureCount }, (_, index) => {
       const attributes = index === 0
-        ? `<attributes><divisions>${divisions}</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>`
+        ? `<attributes><divisions>${divisions}</divisions><key><fifths>${musicalKey.fifths}</fifths><mode>${musicalKey.mode}</mode></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>`
         : "";
       const measureStart = index * 4;
       return `<measure number="${index + 1}">${attributes}${writeStaff(measureStart, 1)}<backup><duration>${measureTicks}</duration></backup>${writeStaff(measureStart, 2)}</measure>`;
@@ -1322,11 +1320,11 @@ export function ScoreCraft() {
               <div className="score-heading">
                 <input value={title} onChange={(event) => setTitle(event.target.value)} aria-label="Printed score title" />
                 <input value={composer} onChange={(event) => setComposer(event.target.value)} aria-label="Composer or arranger" />
-                <div className="score-meta"><span>Andante, con moto</span><span>♩ = {tempo}</span></div>
+                <div className="score-meta"><span>{musicalKey.name}</span><span>♩ = {tempo}</span></div>
               </div>
               <div className="piano-score">
                 {systemStarts.map((systemStart, systemIndex) => (
-                  <PianoSystem key={systemStart} track={tracks[0]} systemStart={systemStart} showLabel={systemIndex === 0} selectedNote={selectedNote} onSelect={setSelectedNote} />
+                  <PianoSystem key={systemStart} track={tracks[0]} musicalKey={musicalKey} systemStart={systemStart} showLabel={systemIndex === 0} selectedNote={selectedNote} onSelect={setSelectedNote} />
                 ))}
               </div>
               <div className="page-footer"><span>ScoreCraft transcription</span><span>1</span></div>
