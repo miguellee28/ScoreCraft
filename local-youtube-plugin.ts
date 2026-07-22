@@ -69,6 +69,20 @@ function sendJson(response: ServerResponse, status: number, message: string) {
   response.end(JSON.stringify({ error: message }));
 }
 
+function friendlyYouTubeError(error: unknown) {
+  const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";
+  if (/ENOENT|yt-dlp(?:\.exe)?.*(?:not found|cannot find|no such file)/i.test(message)) {
+    return "The YouTube downloader is not installed on this server. Run npm install without --ignore-scripts, then restart ScoreCraft.";
+  }
+  if (/ffmpeg.*(?:not found|not installed)|ffprobe.*(?:not found|not installed)/i.test(message)) {
+    return "FFmpeg is not installed on this server. Install FFmpeg, then restart ScoreCraft.";
+  }
+  if (/timed?\s*out|timeout/i.test(message)) {
+    return "YouTube took too long to respond. Try again or choose a shorter section.";
+  }
+  return message;
+}
+
 export function localYouTubeAudioPlugin(): Plugin {
   return {
     name: "scorecraft-local-youtube-audio",
@@ -201,7 +215,7 @@ export function localYouTubeAudioPlugin(): Plugin {
             if (responseStarted) cleanup();
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : "YouTube audio could not be loaded.";
+          const message = friendlyYouTubeError(error);
           sendJson(response, message.includes("too large") ? 413 : 400, message);
         }
       });

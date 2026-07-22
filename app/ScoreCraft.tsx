@@ -672,10 +672,23 @@ export function ScoreCraft() {
         ? `from ${formatTimecode(youtubeStartSeconds)}`
         : `${formatTimecode(youtubeStartSeconds)}–${formatTimecode(youtubeEndSeconds)}`;
       setAnalysis({ progress: 5, label: `Downloading YouTube audio ${rangeLabel}` });
+      const controller = new AbortController();
+      let downloadProgress = 5;
+      const progressTimer = window.setInterval(() => {
+        downloadProgress = Math.min(14, downloadProgress + 1);
+        setAnalysis({
+          progress: downloadProgress,
+          label: downloadProgress < 10 ? `Connecting to YouTube ${rangeLabel}` : "Downloading and trimming the YouTube audio",
+        });
+      }, 5_000);
+      const timeout = window.setTimeout(() => {
+        controller.abort(new Error("The YouTube download timed out after 4 minutes. Check that yt-dlp and FFmpeg are installed on the server."));
+      }, 4 * 60 * 1_000);
       try {
         const response = await fetch("/__local/youtube-audio", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             url: youtubeUrl.trim(),
             startSeconds: youtubeStartSeconds,
@@ -697,6 +710,9 @@ export function ScoreCraft() {
         setAnalysis(null);
         setMessage(error instanceof Error ? error.message : "YouTube audio could not be loaded.");
         return;
+      } finally {
+        window.clearInterval(progressTimer);
+        window.clearTimeout(timeout);
       }
     }
 

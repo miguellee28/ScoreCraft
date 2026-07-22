@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeYouTubeSegment } from "../local-youtube-plugin.ts";
+import { canonicalYouTubeUrl, normalizeYouTubeSegment } from "../local-youtube-plugin.ts";
+
+test("canonicalizes a YouTube watch URL without playlist or radio parameters", () => {
+  assert.equal(
+    canonicalYouTubeUrl("https://www.youtube.com/watch?v=Pfknw2I7H9U&list=RDPfknw2I7H9U&start_radio=1"),
+    "https://www.youtube.com/watch?v=Pfknw2I7H9U",
+  );
+});
 
 test("normalizes explicit and automatic YouTube transcription ranges", () => {
   assert.deepEqual(normalizeYouTubeSegment(30, 90, 180), { start: 30, end: 90 });

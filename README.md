@@ -2,14 +2,14 @@
 
 ScoreCraft is a local piano-transcription workspace. It accepts an uploaded audio file or a YouTube link, transcribes the piano performance, plays the detected notes with a sampled grand piano, and exports a two-staff score as PDF or MusicXML.
 
-Nothing needs to be deployed. The high-accuracy transcription route runs only in the local Vite development server.
+The app can run locally or on a Node.js VPS. `npm start` serves the production build together with the server-side YouTube and piano-transcription routes.
 
 ## Requirements
 
 - Node.js 22.13 or newer
 - Python 3.10, 3.11, or 3.12
 - FFmpeg on `PATH`
-- Windows (the included setup script creates a Windows virtual environment)
+- Windows for the included high-accuracy Transkun setup script; Linux VPS deployments use the browser fallback unless Transkun is configured separately
 
 ## Local setup
 
@@ -27,6 +27,22 @@ Transkun analyzes overlapping audio windows and is intentionally slower than the
 
 For a YouTube source, enter Start and End as seconds, `M:SS`, or `H:MM:SS`. Leaving End blank transcribes from Start to the video end, capped at five minutes. ScoreCraft downloads only the selected section locally, which reduces both download and transcription time.
 
+## Linux VPS setup
+
+Install the system dependency, install Node packages with lifecycle scripts enabled, build, and start the production server:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg
+npm ci
+npm run build
+npm start
+```
+
+Do not use `npm ci --ignore-scripts`: `youtube-dl-exec` uses its install script to download the `yt-dlp` binary. At startup, ScoreCraft reports whether `yt-dlp` and FFmpeg were found. Keep `node_modules` on the VPS and run `npm ci` again after pulling dependency changes.
+
+`npm start -- --port 8080` changes the port; the default is `3000`. When using Nginx or another reverse proxy, allow request bodies up to 150 MB and use a proxy read timeout longer than four minutes.
+
 ## Accuracy verification
 
 Compare a generated Transkun MIDI with a reference MIDI:
@@ -40,6 +56,7 @@ The report separates exact pitch/onset matches from duration and velocity matche
 ## Commands
 
 - `npm run dev` — start ScoreCraft locally
+- `npm start` — start the built app on a Node.js VPS with the local processing routes enabled
 - `npm run setup:transkun` — install the isolated high-accuracy piano runtime
 - `npm run build` — compile a production build for verification
 - `npm test` — build and run the timing/rendering tests
