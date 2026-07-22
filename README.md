@@ -1,98 +1,50 @@
-# vinext-starter
+# ScoreCraft
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+ScoreCraft is a local piano-transcription workspace. It accepts an uploaded audio file or a YouTube link, transcribes the piano performance, plays the detected notes with a sampled grand piano, and exports a two-staff score as PDF or MusicXML.
 
-## Prerequisites
+Nothing needs to be deployed. The high-accuracy transcription route runs only in the local Vite development server.
 
-- Node.js `>=22.13.0`
+## Requirements
 
-## Quick Start
+- Node.js 22.13 or newer
+- Python 3.10, 3.11, or 3.12
+- FFmpeg on `PATH`
+- Windows (the included setup script creates a Windows virtual environment)
 
-```bash
+## Local setup
+
+```powershell
 npm install
+npm run setup:transkun
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+If more than one Python is installed and the setup script cannot find a compatible version, run `powershell -ExecutionPolicy Bypass -File scripts/setup-transkun.ps1 -Python C:\path\to\python.exe`.
 
-## Included Shape
+Open the localhost URL printed by `npm run dev`. The first Transkun setup downloads the CPU PyTorch runtime and the approximately 54 MB piano checkpoint into the ignored `tmp/` directory.
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+Transkun analyzes overlapping audio windows and is intentionally slower than the browser fallback. On a CPU-only machine, a three-to-four-minute recording can take several minutes. Keep the local terminal open until transcription finishes.
 
-## Workspace Auth Headers
+## Accuracy verification
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+Compare a generated Transkun MIDI with a reference MIDI:
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```powershell
+npm run compare:midi -- path\to\transcribed.mid path\to\reference.mid optional-browser-hints.json
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+The report separates exact pitch/onset matches from duration and velocity matches. ScoreCraft uses a 16-ticks-per-beat internal grid so 32nd- and 64th-note offsets survive playback, grand-staff engraving, MusicXML, and PDF export.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+## Commands
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+- `npm run dev` — start ScoreCraft locally
+- `npm run setup:transkun` — install the isolated high-accuracy piano runtime
+- `npm run build` — compile a production build for verification
+- `npm test` — build and run the timing/rendering tests
+- `npm run compare:midi -- <generated.mid> <reference.mid>` — compare transcription structure
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+## Transcription engines
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+ScoreCraft prefers the local Transkun 2.0.1 piano model. If that runtime is not installed, it falls back to Spotify Basic Pitch in the browser. The browser fallback is faster to start but is less accurate on dense polyphonic piano recordings.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+The Transkun checkpoint is trained on MAESTRO. Review its dataset/model terms before commercial redistribution; the setup script downloads the model locally and does not commit it to this repository.

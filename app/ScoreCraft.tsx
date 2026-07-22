@@ -9,6 +9,12 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  PIANO_TICK_BEATS,
+  PIANO_TICKS_PER_BEAT,
+  quantizeBeat,
+  quantizePianoEvents,
+} from "./piano-timing";
 
 type Note = {
   midi: number;
@@ -31,6 +37,7 @@ type Track = {
   muted: boolean;
   solo: boolean;
 };
+
 
 const TREBLE_CLEF = "\u{1D11E}";
 const BASS_CLEF = "\u{1D122}";
@@ -132,26 +139,6 @@ function inferChordProgression(notes: Note[]) {
     if (emissions[measure][currentIndex] - emissions[measure][priorIndex] < 1.5) progression[measure] = prior;
   }
   return progression;
-}
-
-function quantizePianoEvents(
-  events: Array<{ midi: number; startSeconds: number; durationSeconds: number; velocity: number }>,
-  tempo: number,
-) {
-  const audible = events.filter((note) => note.velocity >= 52 && note.durationSeconds >= 0.1);
-  const scoreOriginSeconds = Math.max(0, Math.min(
-    ...((audible.length ? audible : events).map((note) => note.startSeconds)),
-  ));
-  const secondsPerBeat = 60 / tempo;
-  return events.map((note, sourceIndex) => ({
-    midi: note.midi,
-    sourceIndex,
-    startBeat: Math.max(0, Math.round(((note.startSeconds - scoreOriginSeconds) / secondsPerBeat) * 4) / 4),
-    beats: Math.max(0.25, Math.min(4, Math.round((note.durationSeconds / secondsPerBeat) * 4) / 4)),
-    velocity: note.velocity,
-    startSeconds: note.startSeconds,
-    durationSeconds: note.durationSeconds,
-  }));
 }
 
 function cleanPianoNotes(notes: Note[]) {
@@ -392,14 +379,18 @@ function PianoSystem({
         .map((note, index) => ({ ...note, index }))
         .filter((note) => note.startBeat >= systemStart && note.startBeat < systemStart + 8);
 
-      const durationFor = (beats: number) => beats >= 4 ? [4, "w", false] as const
-        : beats >= 3 ? [3, "h", true] as const
-        : beats >= 2 ? [2, "h", false] as const
-        : beats >= 1.5 ? [1.5, "q", true] as const
-        : beats >= 1 ? [1, "q", false] as const
-        : beats >= 0.75 ? [0.75, "8", true] as const
-        : beats >= 0.5 ? [0.5, "8", false] as const
-        : [0.25, "16", false] as const;
+      const durationForTicks = (ticks: number) => ticks >= 64 ? [64, "w", false] as const
+        : ticks >= 48 ? [48, "h", true] as const
+        : ticks >= 32 ? [32, "h", false] as const
+        : ticks >= 24 ? [24, "q", true] as const
+        : ticks >= 16 ? [16, "q", false] as const
+        : ticks >= 12 ? [12, "8", true] as const
+        : ticks >= 8 ? [8, "8", false] as const
+        : ticks >= 6 ? [6, "16", true] as const
+        : ticks >= 4 ? [4, "16", false] as const
+        : ticks >= 3 ? [3, "32", true] as const
+        : ticks >= 2 ? [2, "32", false] as const
+        : [1, "64", false] as const;
 
       const bindRenderedNotes = (before: number, indexes: Array<number | null>) => {
         [...target.querySelectorAll<SVGGElement>(".vf-stavenote")].slice(before).forEach((element, renderedIndex) => {
@@ -423,15 +414,10 @@ function PianoSystem({
           .filter((note) => clef === "treble" ? note.midi >= 60 : note.midi < 60)
           .filter((note) => note.startBeat >= measureStart && note.startBeat < measureEnd)
           .forEach((note) => {
-            const onset = Math.round(note.startBeat * 4) / 4;
+            const onset = quantizeBeat(note.startBeat);
             if (onset >= measureEnd) return;
             groups.set(onset, [...(groups.get(onset) ?? []), note]);
           });
-        const earliestOnset = Math.min(...groups.keys());
-        if (Number.isFinite(earliestOnset) && earliestOnset > measureStart && earliestOnset - measureStart <= 0.5) {
-          groups.set(measureStart, [...(groups.get(measureStart) ?? []), ...(groups.get(earliestOnset) ?? [])]);
-          groups.delete(earliestOnset);
-        }
         const starts = [...groups.keys()].sort((a, b) => a - b);
         const tickables: InstanceType<typeof StaveNote>[] = [];
         const indexes: Array<number | null> = [];
@@ -439,11 +425,11 @@ function PianoSystem({
         let cursor = measureStart;
 
         const addDuration = (beats: number, rest: boolean, group: Array<Note & { index: number }> = []) => {
-          let remaining = Math.round(beats * 4) / 4;
+          let remainingTicks = Math.round(beats * PIANO_TICKS_PER_BEAT);
           let previousSegment: InstanceType<typeof StaveNote> | null = null;
           let segmentIndex = 0;
-          while (remaining >= 0.25) {
-            const [used, duration, dotted] = durationFor(remaining);
+          while (remainingTicks >= 1) {
+            const [usedTicks, duration, dotted] = durationForTicks(remainingTicks);
             const sorted = [...group].sort((a, b) => a.midi - b.midi);
             const staveNote = new StaveNote({
               clef,
@@ -477,7 +463,7 @@ function PianoSystem({
             indexes.push(rest ? null : sorted[0]?.index ?? null);
             previousSegment = rest ? null : staveNote;
             segmentIndex += 1;
-            remaining -= used;
+            remainingTicks -= usedTicks;
           }
         };
 
@@ -485,11 +471,9 @@ function PianoSystem({
           if (onset > cursor) addDuration(onset - cursor, true);
           const nextOnset = starts[groupIndex + 1] ?? measureEnd;
           const group = groups.get(onset) ?? [];
-          const available = Math.max(0.25, Math.min(nextOnset - onset, measureEnd - onset));
-          const detectedDuration = Math.max(0.25, ...group.map((note) => note.beats));
-          let engravedDuration = Math.min(available, detectedDuration);
-          if (available - engravedDuration <= 0.25) engravedDuration = available;
-          engravedDuration = Math.max(0.25, Math.round(engravedDuration * 4) / 4);
+          const available = Math.max(PIANO_TICK_BEATS, Math.min(nextOnset - onset, measureEnd - onset));
+          const detectedDuration = Math.max(PIANO_TICK_BEATS, ...group.map((note) => note.beats));
+          const engravedDuration = Math.max(PIANO_TICK_BEATS, quantizeBeat(Math.min(available, detectedDuration)));
           addDuration(engravedDuration, false, group);
           cursor = onset + engravedDuration;
         });
@@ -565,7 +549,7 @@ export function ScoreCraft() {
   const audioContext = useRef<AudioContext | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const totalBeats = useMemo(() => Math.max(16, ...tracks.flatMap((track) => track.notes.map((note) => note.startBeat + note.beats))), [tracks]);
-  const systemStarts = useMemo(() => Array.from({ length: Math.min(40, Math.ceil(totalBeats / 8)) }, (_, index) => index * 8), [totalBeats]);
+  const systemStarts = useMemo(() => Array.from({ length: Math.ceil(totalBeats / 8) }, (_, index) => index * 8), [totalBeats]);
   const duration = Math.max(1, Math.ceil(sourceDuration ?? totalBeats * 60 / tempo));
 
   const validYoutubeUrl = isValidYouTubeUrl(youtubeUrl.trim());
@@ -680,7 +664,11 @@ export function ScoreCraft() {
         const transcription = await transcribePiano(sourceFile, (progress, label) => setAnalysis({ progress, label }));
         const detectedTempo = transcription.tempo;
         setTempo(detectedTempo);
-        const quantized = quantizePianoEvents(transcription.notes, detectedTempo);
+        const quantized = quantizePianoEvents(
+          transcription.notes,
+          detectedTempo,
+          transcription.engine,
+        );
         playbackNoteCount = quantized.length;
         setPlaybackNotes(quantized);
         const params = new URLSearchParams(window.location.search);
@@ -695,7 +683,7 @@ export function ScoreCraft() {
           setMessage(`QA transcription ready with ${quantized.length} detected piano notes.`);
           return;
         }
-        notes = cleanPianoNotes(quantized);
+        notes = transcription.engine === "transkun-2.0.1" ? quantized : cleanPianoNotes(quantized);
       } catch (error) {
         setAnalysis(null);
         setMessage(error instanceof Error ? `Piano transcription failed: ${error.message}` : "The browser could not transcribe this audio.");
@@ -744,7 +732,10 @@ export function ScoreCraft() {
     const piano = tracks[0];
     const events = (!piano || piano.muted ? [] : playbackNotes)
       .map((note) => ({ note, volume: piano?.volume ?? 78 }))
-      .sort((a, b) => a.note.startBeat - b.note.startBeat || a.note.midi - b.note.midi);
+      .sort((a, b) => (
+        (a.note.startSeconds ?? a.note.startBeat * beatSeconds)
+        - (b.note.startSeconds ?? b.note.startBeat * beatSeconds)
+      ) || a.note.midi - b.note.midi);
     if (!events.length) {
       setMessage("There are no audible piano notes. Unmute Piano or transcribe a recording first.");
       stopPlayback();
@@ -783,11 +774,11 @@ export function ScoreCraft() {
 
     const scheduleNote = (note: Note, volume: number, sourcePosition: number) => {
       const noteStart = note.startSeconds ?? note.startBeat * beatSeconds;
-      const noteDuration = Math.max(0.14, note.durationSeconds ?? note.beats * beatSeconds);
+      const noteDuration = Math.max(0.005, note.durationSeconds ?? note.beats * beatSeconds);
       const elapsedIntoNote = Math.max(0, sourcePosition - noteStart);
       if (elapsedIntoNote >= noteDuration) return;
       const when = Math.max(context.currentTime + 0.005, audioOrigin + noteStart);
-      const audibleDuration = Math.max(0.08, noteDuration - elapsedIntoNote);
+      const audibleDuration = Math.max(0.005, noteDuration - elapsedIntoNote);
       const anchor = pianoSampleMidis.reduce((nearest, midi) => (
         Math.abs(midi - note.midi) < Math.abs(nearest - note.midi) ? midi : nearest
       ), pianoSampleMidis[0]);
@@ -914,46 +905,83 @@ export function ScoreCraft() {
   }
 
   function exportPianoMusicXml() {
-    const divisions = 4;
+    const divisions = PIANO_TICKS_PER_BEAT;
+    const measureTicks = divisions * 4;
     const piano = tracks[0];
     const measureCount = Math.max(1, Math.ceil(totalBeats / 4));
-    const typeFor = (ticks: number) => ticks >= 16 ? "whole" : ticks >= 8 ? "half" : ticks >= 4 ? "quarter" : ticks >= 2 ? "eighth" : "16th";
+    const notationFor = (ticks: number) => {
+      const notation = new Map<number, [string, boolean]>([
+        [64, ["whole", false]], [48, ["half", true]], [32, ["half", false]],
+        [24, ["quarter", true]], [16, ["quarter", false]], [12, ["eighth", true]],
+        [8, ["eighth", false]], [6, ["16th", true]], [4, ["16th", false]],
+        [3, ["32nd", true]], [2, ["32nd", false]], [1, ["64th", false]],
+      ]).get(ticks);
+      return notation ? `<type>${notation[0]}</type>${notation[1] ? "<dot/>" : ""}` : "";
+    };
     const writeStaff = (measureStart: number, staff: 1 | 2) => {
-      const measureEnd = measureStart + 4;
-      const notes = piano.notes
-        .filter((note) => note.startBeat >= measureStart && note.startBeat < measureEnd)
-        .filter((note) => staff === 1 ? note.midi >= 60 : note.midi < 60);
-      const groups = new Map<number, Note[]>();
-      notes.forEach((note) => {
-        const onset = Math.round(note.startBeat * divisions) / divisions;
-        groups.set(onset, [...(groups.get(onset) ?? []), note]);
+      const measureStartTick = Math.round(measureStart * divisions);
+      const measureEndTick = measureStartTick + measureTicks;
+      type Segment = Note & { startTick: number; endTick: number; tieStart: boolean; tieStop: boolean };
+      const segments = piano.notes
+        .filter((note) => staff === 1 ? note.midi >= 60 : note.midi < 60)
+        .map((note): Segment => {
+          const originalStart = Math.round(note.startBeat * divisions);
+          const originalEnd = originalStart + Math.max(1, Math.round(note.beats * divisions));
+          return {
+            ...note,
+            startTick: Math.max(measureStartTick, originalStart),
+            endTick: Math.min(measureEndTick, originalEnd),
+            tieStart: originalEnd > measureEndTick,
+            tieStop: originalStart < measureStartTick,
+          };
+        })
+        .filter((note) => note.startTick < note.endTick)
+        .sort((a, b) => a.startTick - b.startTick || a.endTick - b.endTick || a.midi - b.midi);
+
+      const eventGroups = new Map<string, Segment[]>();
+      segments.forEach((note) => {
+        const key = `${note.startTick}:${note.endTick}:${note.tieStart}:${note.tieStop}`;
+        eventGroups.set(key, [...(eventGroups.get(key) ?? []), note]);
       });
-      const starts = [...groups.keys()].sort((a, b) => a - b);
-      const xml: string[] = [];
-      let cursorTicks = 0;
-      starts.forEach((start, groupIndex) => {
-        const onsetTicks = Math.round((start - measureStart) * divisions);
-        if (onsetTicks > cursorTicks) {
-          const restTicks = onsetTicks - cursorTicks;
-          xml.push(`<note><rest/><duration>${restTicks}</duration><voice>${staff}</voice><type>${typeFor(restTicks)}</type><staff>${staff}</staff></note>`);
+      const events = [...eventGroups.values()].sort((a, b) => a[0].startTick - b[0].startTick || a[0].endTick - b[0].endTick);
+      const voices: Segment[][][] = [];
+      const voiceEnds: number[] = [];
+      events.forEach((event) => {
+        let voiceIndex = voiceEnds.findIndex((end) => end <= event[0].startTick);
+        if (voiceIndex < 0) {
+          voiceIndex = voices.length;
+          voices.push([]);
+          voiceEnds.push(measureStartTick);
         }
-        const group = groups.get(start) ?? [];
-        const nextStart = starts[groupIndex + 1] ?? measureEnd;
-        const durationTicks = Math.max(1, Math.min(
-          Math.round(Math.min(...group.map((note) => note.beats)) * divisions),
-          Math.round((nextStart - start) * divisions),
-          16 - onsetTicks,
-        ));
-        group.sort((a, b) => a.midi - b.midi).forEach((note, noteIndex) => {
-          xml.push(`<note>${noteIndex ? "<chord/>" : ""}${musicXmlPitch(note.midi)}<duration>${durationTicks}</duration><voice>${staff}</voice><type>${typeFor(durationTicks)}</type><velocity>${note.velocity ?? 80}</velocity><staff>${staff}</staff></note>`);
-        });
-        cursorTicks = onsetTicks + durationTicks;
+        voices[voiceIndex].push(event);
+        voiceEnds[voiceIndex] = event[0].endTick;
       });
-      if (cursorTicks < 16) {
-        const restTicks = 16 - cursorTicks;
-        xml.push(`<note><rest/><duration>${restTicks}</duration><voice>${staff}</voice><type>${typeFor(restTicks)}</type><staff>${staff}</staff></note>`);
-      }
-      return xml.join("");
+      if (!voices.length) voices.push([]);
+
+      return voices.map((voice, voiceIndex) => {
+        const voiceNumber = staff * 10 + voiceIndex + 1;
+        const xml: string[] = voiceIndex ? [`<backup><duration>${measureTicks}</duration></backup>`] : [];
+        let cursorTick = measureStartTick;
+        voice.forEach((group) => {
+          const first = group[0];
+          if (first.startTick > cursorTick) {
+            xml.push(`<forward><duration>${first.startTick - cursorTick}</duration><voice>${voiceNumber}</voice><staff>${staff}</staff></forward>`);
+          }
+          const durationTicks = first.endTick - first.startTick;
+          group.sort((a, b) => a.midi - b.midi).forEach((note, noteIndex) => {
+            const ties = `${note.tieStop ? '<tie type="stop"/>' : ""}${note.tieStart ? '<tie type="start"/>' : ""}`;
+            const tied = note.tieStop || note.tieStart
+              ? `<notations>${note.tieStop ? '<tied type="stop"/>' : ""}${note.tieStart ? '<tied type="start"/>' : ""}</notations>`
+              : "";
+            xml.push(`<note>${noteIndex ? "<chord/>" : ""}${musicXmlPitch(note.midi)}<duration>${durationTicks}</duration>${ties}<voice>${voiceNumber}</voice>${notationFor(durationTicks)}<velocity>${note.velocity ?? 80}</velocity><staff>${staff}</staff>${tied}</note>`);
+          });
+          cursorTick = first.endTick;
+        });
+        if (cursorTick < measureEndTick) {
+          xml.push(`<forward><duration>${measureEndTick - cursorTick}</duration><voice>${voiceNumber}</voice><staff>${staff}</staff></forward>`);
+        }
+        return xml.join("");
+      }).join("");
     };
 
     const measures = Array.from({ length: measureCount }, (_, index) => {
@@ -961,7 +989,7 @@ export function ScoreCraft() {
         ? `<attributes><divisions>${divisions}</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes><direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempo}</per-minute></metronome></direction-type><sound tempo="${tempo}"/></direction>`
         : "";
       const measureStart = index * 4;
-      return `<measure number="${index + 1}">${attributes}${writeStaff(measureStart, 1)}<backup><duration>16</duration></backup>${writeStaff(measureStart, 2)}</measure>`;
+      return `<measure number="${index + 1}">${attributes}${writeStaff(measureStart, 1)}<backup><duration>${measureTicks}</duration></backup>${writeStaff(measureStart, 2)}</measure>`;
     }).join("");
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">\n<score-partwise version="4.0"><work><work-title>${xmlEscape(title)}</work-title></work><identification><creator type="composer">${xmlEscape(composer)}</creator><encoding><software>ScoreCraft</software></encoding></identification><part-list><score-part id="P1"><part-name>Piano</part-name><part-abbreviation>Pno.</part-abbreviation></score-part></part-list><part id="P1">${measures}</part></score-partwise>`;
     const link = document.createElement("a");

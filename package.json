@@ -8,8 +8,10 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "compare:midi": "node --experimental-strip-types scripts/compare-piano-midi.mjs",
     "start": "vinext start",
-    "test": "vinext build && node --test tests/rendered-html.test.mjs",
+    "setup:transkun": "powershell -ExecutionPolicy Bypass -File scripts/setup-transkun.ps1",
+    "test": "vinext build && node --experimental-strip-types --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

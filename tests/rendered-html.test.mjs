@@ -24,10 +24,12 @@ test("renders the ScoreCraft music workspace", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("keeps full transcription playback and print-ready piano export", async () => {
-  const [component, transcription, youtubePlugin, styles, samples] = await Promise.all([
+test("keeps exact local transcription playback and print-ready piano export", async () => {
+  const [component, timing, transcription, pianoPlugin, youtubePlugin, styles, samples] = await Promise.all([
     readFile(new URL("../app/ScoreCraft.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/piano-timing.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/piano-transcription.ts", import.meta.url), "utf8"),
+    readFile(new URL("../local-piano-transcription-plugin.ts", import.meta.url), "utf8"),
     readFile(new URL("../local-youtube-plugin.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readdir(new URL("../public/salamander-piano/", import.meta.url)),
@@ -40,11 +42,18 @@ test("keeps full transcription playback and print-ready piano export", async () 
   assert.match(component, /elapsedIntoNote \* source\.playbackRate\.value/);
   assert.match(component, /\*\* 1\.7/);
   assert.match(component, /new StaveTie/);
-  assert.match(component, /available - engravedDuration <= 0\.25/);
+  assert.match(timing, /const PIANO_TICKS_PER_BEAT = 16/);
+  assert.match(component, /\[1, \["64th", false\]\]/);
+  assert.match(component, /<backup><duration>\$\{measureTicks\}<\/duration><\/backup>/);
+  assert.doesNotMatch(component, /available - engravedDuration <= 0\.25/);
   assert.match(component, /PDF exported: \$\{pdf\.getNumberOfPages\(\)\} A4 pages/);
+  assert.match(transcription, /\/__local\/piano-transcribe/);
+  assert.match(transcription, /engine: "transkun-2\.0\.1"/);
   assert.match(transcription, /onsetThreshold: 0\.48/);
   assert.match(transcription, /frameThreshold: 0\.33/);
   assert.match(transcription, /function normalizeDetectedNotes/);
+  assert.match(pianoPlugin, /--segmentHopSize/);
+  assert.match(pianoPlugin, /parsePianoMidi/);
   assert.match(youtubePlugin, /const maxDownloadAttempts = 3/);
   assert.match(youtubePlugin, /X-ScoreCraft-Download-Attempt/);
   assert.match(styles, /\.piano-grand-system:nth-child\(4n\)/);

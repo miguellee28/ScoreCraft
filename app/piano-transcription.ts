@@ -10,7 +10,18 @@ export type PianoNoteEvent = {
 export type PianoTranscriptionResult = {
   notes: PianoNoteEvent[];
   tempo: number;
+  engine: "transkun-2.0.1" | "basic-pitch";
+  durationHints?: PianoNoteEvent[];
 };
+
+type LocalTranscriptionResponse = {
+  engine?: "transkun-2.0.1";
+  notes?: PianoNoteEvent[];
+  error?: string;
+  unavailable?: boolean;
+};
+
+class LocalModelUnavailableError extends Error {}
 
 let modelPromise: Promise<BasicPitch> | null = null;
 
@@ -29,6 +40,40 @@ function getModel() {
     modelPromise = Promise.resolve(new BasicPitch("/basic-pitch/model.json"));
   }
   return modelPromise;
+}
+
+async function transcribeWithLocalModel(
+  file: File,
+  onProgress: (progress: number, label: string) => void,
+) {
+  let progress = 25;
+  const progressTimer = window.setInterval(() => {
+    progress = Math.min(88, progress + Math.max(1, Math.round((88 - progress) * 0.035)));
+    onProgress(progress, "Tracing complete piano notes locally (CPU; long recordings take several minutes)");
+  }, 5_000);
+  try {
+    onProgress(progress, "Starting the high-accuracy local piano model");
+    const response = await fetch("/__local/piano-transcribe", {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-ScoreCraft-Filename": encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+    const result = await response.json().catch(() => ({})) as LocalTranscriptionResponse;
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 503 || result.unavailable) {
+        throw new LocalModelUnavailableError(result.error || "The high-accuracy local piano model is unavailable.");
+      }
+      throw new Error(result.error || "The high-accuracy local piano model failed.");
+    }
+    if (!result.notes?.length) throw new Error("The high-accuracy local piano model returned no notes.");
+    onProgress(92, `Recovered ${result.notes.length} complete piano notes`);
+    return result.notes;
+  } finally {
+    window.clearInterval(progressTimer);
+  }
 }
 
 function estimateTempo(audio: AudioBuffer) {
@@ -149,6 +194,58 @@ function mergeSamePitchFragments(notes: PianoNoteEvent[], tempo: number) {
   return repaired.sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
 }
 
+async function transcribeWithBrowserModel(
+  audio: AudioBuffer,
+  tempo: number,
+  onProgress?: (percent: number) => void,
+) {
+  const model = await getModel();
+  const frames: number[][] = [];
+  const onsets: number[][] = [];
+  await model.evaluateModel(
+    audio,
+    (nextFrames, nextOnsets) => {
+      frames.push(...nextFrames);
+      onsets.push(...nextOnsets);
+    },
+    (percent) => onProgress?.(percent),
+  );
+
+  const detected = noteFramesToTime(outputToNotesPoly(
+    frames,
+    onsets,
+    PIANO_PROFILE.onsetThreshold,
+    PIANO_PROFILE.frameThreshold,
+    PIANO_PROFILE.minimumNoteLengthFrames,
+    true,
+    4200,
+    27.5,
+  ))
+    .map((note) => ({
+      midi: note.pitchMidi,
+      startSeconds: note.startTimeSeconds,
+      durationSeconds: note.durationSeconds,
+      velocity: Math.round(note.amplitude * 127),
+    }))
+    .filter((note) => (
+      note.midi >= 24
+      && note.midi <= 100
+      && note.durationSeconds >= 0.1
+      && note.velocity >= PIANO_PROFILE.minimumVelocity
+    ))
+    .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
+
+  const shortArtifactMaximumSeconds = Math.min(
+    PIANO_PROFILE.shortArtifactMaximumSeconds,
+    15 / tempo,
+  );
+  const cleaned = normalizeDetectedNotes(detected).filter((note) => (
+    note.durationSeconds >= shortArtifactMaximumSeconds
+    || note.velocity >= PIANO_PROFILE.shortArtifactMinimumVelocity
+  ));
+  return mergeSamePitchFragments(cleaned, tempo);
+}
+
 export async function transcribePiano(
   file: File,
   onProgress: (progress: number, label: string) => void,
@@ -167,61 +264,20 @@ export async function transcribePiano(
     source.start(0, 0, analyzedSeconds);
     const audio = await offline.startRendering();
     const detectedTempo = estimateTempo(audio);
+    try {
+      const localNotes = await transcribeWithLocalModel(file, onProgress);
+      onProgress(96, "Reconstructing score timing for playback and notation");
+      return { notes: localNotes, tempo: detectedTempo, engine: "transkun-2.0.1" };
+    } catch (error) {
+      if (!(error instanceof LocalModelUnavailableError)) throw error;
+      onProgress(25, "High-accuracy model is not installed; using the browser piano model");
+    }
 
-    onProgress(25, "Loading the local polyphonic piano model");
-    const model = await getModel();
-    const frames: number[][] = [];
-    const onsets: number[][] = [];
-
-    await model.evaluateModel(
-      audio,
-      (nextFrames, nextOnsets) => {
-        frames.push(...nextFrames);
-        onsets.push(...nextOnsets);
-      },
-      (percent) => onProgress(
-        28 + Math.round(percent * 62),
-        "Separating melody, chords, and bass notes",
-      ),
-    );
-
-    onProgress(92, "Removing weak and duplicate piano artifacts");
-    const detected = noteFramesToTime(outputToNotesPoly(
-      frames,
-      onsets,
-      PIANO_PROFILE.onsetThreshold,
-      PIANO_PROFILE.frameThreshold,
-      PIANO_PROFILE.minimumNoteLengthFrames,
-      true,
-      4200,
-      27.5,
-    ))
-      .map((note) => ({
-        midi: note.pitchMidi,
-        startSeconds: note.startTimeSeconds,
-        durationSeconds: note.durationSeconds,
-        velocity: Math.round(note.amplitude * 127),
-      }))
-      .filter((note) => (
-        note.midi >= 24
-        && note.midi <= 100
-        && note.durationSeconds >= 0.1
-        && note.velocity >= PIANO_PROFILE.minimumVelocity
-      ))
-      .sort((a, b) => a.startSeconds - b.startSeconds || b.velocity - a.velocity || a.midi - b.midi);
-
-    const shortArtifactMaximumSeconds = Math.min(
-      PIANO_PROFILE.shortArtifactMaximumSeconds,
-      15 / detectedTempo,
-    );
-    const cleaned = normalizeDetectedNotes(detected).filter((note) => (
-      note.durationSeconds >= shortArtifactMaximumSeconds
-      || note.velocity >= PIANO_PROFILE.shortArtifactMinimumVelocity
-    ));
-    const repaired = mergeSamePitchFragments(cleaned, detectedTempo);
-
+    const repaired = await transcribeWithBrowserModel(audio, detectedTempo, (percent) => {
+      onProgress(28 + Math.round(percent * 62), "Separating melody, chords, and bass notes");
+    });
     onProgress(96, "Preparing the readable grand staff");
-    return { notes: repaired, tempo: detectedTempo };
+    return { notes: repaired, tempo: detectedTempo, engine: "basic-pitch" };
   } finally {
     await context.close();
   }

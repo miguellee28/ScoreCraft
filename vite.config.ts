@@ -2,6 +2,7 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
+import { localPianoTranscriptionPlugin } from "./local-piano-transcription-plugin";
 import { localYouTubeAudioPlugin } from "./local-youtube-plugin";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -50,6 +51,7 @@ export default defineConfig(async () => {
       : undefined,
     plugins: [
       localYouTubeAudioPlugin(),
+      localPianoTranscriptionPlugin(),
       vinext(),
       sites(),
       cloudflare({
